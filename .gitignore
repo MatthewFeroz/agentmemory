@@ -1,0 +1,36 @@
+# =============================================================================
+# .gitignore — Files that should never be committed to version control
+# =============================================================================
+
+# --- Secrets -----------------------------------------------------------------
+# The .env file contains API keys. Only .env.example (with placeholder values)
+# should be committed.
+.env
+
+# --- Presentation docs -------------------------------------------------------
+# Personal notes, decisions log, and slide drafts. These are working materials
+# that inform the presentation but should not ship with the demo code.
+docs/
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- Virtual environments ----------------------------------------------------
+venv/
+.venv/
+env/
+
+# --- IDE ---------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ----------------------------------------------------------------------
+.DS_Store
+Thumbs.db
