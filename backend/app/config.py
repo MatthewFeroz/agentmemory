@@ -46,6 +46,25 @@ class Settings(BaseSettings):
     # loudly on boot than silently on the first chat request.
     anthropic_api_key: str
 
+    # ---- Redis Agent Memory Server settings ---------------------------------
+
+    # Base URL for the Agent Memory Server REST API.
+    # This backend does NOT talk directly to Redis. Instead, it talks to
+    # Agent Memory Server, and Agent Memory Server persists the working memory
+    # into Redis for us.
+    #
+    # Why do it this way?
+    #   - Less code in our app: we don't manually manage Redis keys/lists
+    #   - Better teaching value: working memory becomes an explicit service
+    #   - Easier path to long-term memory later: same client, same server
+    memory_api_url: str = "http://localhost:32769"
+
+    # Optional namespace used by Agent Memory Server to group memory records.
+    # For the absolute simplest implementation, None means "use the server's
+    # default namespace behavior." We keep it configurable so the concept is
+    # visible without forcing extra complexity into the first version.
+    memory_namespace: str | None = None
+
     # ---- Optional settings with sensible defaults ---------------------------
 
     # Which Claude model to use for chat completions.

@@ -9,13 +9,13 @@
 # FastAPI is an async-first Python web framework that auto-generates OpenAPI
 # docs at /docs. It's ideal for demos because reviewers can interact with the
 # API directly in the browser without a frontend.
-fastapi==0.115.12
+fastapi==0.135.3
 
 # --- ASGI server -------------------------------------------------------------
 # Uvicorn is the ASGI server that actually runs our FastAPI app. Think of
 # FastAPI as the blueprint and Uvicorn as the engine that serves HTTP requests.
 # The [standard] extra adds uvloop + httptools for better performance.
-uvicorn[standard]==0.34.2
+uvicorn[standard]==0.44.0
 
 # --- Anthropic SDK -----------------------------------------------------------
 # The official Python SDK for calling Claude models. We use the synchronous
@@ -23,14 +23,22 @@ uvicorn[standard]==0.34.2
 # demo simple. The SDK automatically reads ANTHROPIC_API_KEY from the env.
 anthropic==0.94.0
 
+# --- Redis Agent Memory Server client ----------------------------------------
+# This is the Python SDK for Redis Agent Memory Server (AMS). We use it to:
+#   1. Load short-term conversation history (working memory) by session_id
+#   2. Store the latest user/assistant turn back into Redis after each reply
+#   3. Eventually add long-term memory in a later phase
+# We pin the version so the SDK API stays stable for the demo and walkthrough.
+agent-memory-client==0.14.0
+
 # --- Settings management -----------------------------------------------------
 # pydantic-settings loads environment variables into typed Python objects.
 # This gives us validation at startup (crash early if ANTHROPIC_API_KEY is
 # missing) rather than a cryptic error on the first API call.
-pydantic-settings==2.9.1
+pydantic-settings==2.13.1
 
 # --- Environment file loading ------------------------------------------------
 # python-dotenv reads .env files so we don't have to export vars manually.
 # Uvicorn's --env-file flag uses this under the hood, and pydantic-settings
 # also uses it when we set `env_file = ".env"` in our Settings class.
-python-dotenv==1.1.0
+python-dotenv==1.2.2

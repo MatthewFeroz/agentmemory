@@ -37,6 +37,7 @@ from backend.app.models import (             # request/response schemas
     HealthResponse,
 )
 from backend.app.services.anthropic import AnthropicService  # Claude wrapper
+from backend.app.services.memory import MemoryService         # Redis-backed memory wrapper
 
 
 # =============================================================================
@@ -45,13 +46,9 @@ from backend.app.services.anthropic import AnthropicService  # Claude wrapper
 # We store the AnthropicService instance here so all endpoints can access it.
 # It's initialized during the lifespan startup event (see below).
 #
-# WHY NOT use FastAPI's dependency injection (Depends)?
-# We could, but for a demo app this is simpler and more explicit. The service
-# is created once at startup and lives for the entire application lifetime.
-# With Depends(), we'd need a factory function and the indirection makes the
-# code harder to explain in a presentation.
 # =============================================================================
 _anthropic_service: AnthropicService | None = None
+_memory_service: MemoryService | None = None
 
 
 # =============================================================================
@@ -75,7 +72,7 @@ async def lifespan(app: FastAPI):
     Everything after `yield` runs on shutdown.
     """
     # --- STARTUP -------------------------------------------------------------
-    global _anthropic_service
+    global _anthropic_service, _memory_service
 
     # Load and validate settings from environment variables.
     # If ANTHROPIC_API_KEY is missing, this will raise a validation error
@@ -87,18 +84,28 @@ async def lifespan(app: FastAPI):
     # someone hits the /chat endpoint.
     _anthropic_service = AnthropicService(settings)
 
+    # Create the memory service that talks to Agent Memory Server.
+    # This is the new piece for Task 2 Part 2.
+    #
+    # Important architecture note:
+    # - AnthropicService talks to Claude
+    # - MemoryService talks to Agent Memory Server
+    # - Agent Memory Server persists working memory into Redis
+    _memory_service = MemoryService(settings)
+
     # Log a startup message so we can confirm the server is configured correctly.
-    print(f"[OK] Chat backend started -- model: {settings.anthropic_model}")
+    print(f"[OK] Chat backend started, model= {settings.anthropic_model}")
 
     # yield hands control to FastAPI to start serving requests.
     # The server is now live and accepting traffic.
     yield
 
     # --- SHUTDOWN ------------------------------------------------------------
-    # Clean up resources here if needed. Currently we don't have any
-    # persistent connections to close, but when we add Redis in Task 2,
-    # we'll close the Redis connection pool here.
-    print("[BYE] Chat backend shutting down")
+    # Clean up any long-lived network clients on shutdown.
+    if _memory_service is not None:
+        await _memory_service.close()
+
+    print("[BYE] Chat backend shutting down, thanks!")
 
 
 # =============================================================================
@@ -119,8 +126,7 @@ app = FastAPI(
         "and long-term conversation persistence."
     ),
 
-    # API version — follows semantic versioning. We're at 0.1.0 because
-    # this is the initial backend-only phase (Task 1).
+    # API version — follows semantic versioning.
     version="0.1.0",
 
     # Wire up our lifespan handler for startup/shutdown logic.
@@ -140,10 +146,6 @@ app = FastAPI(
 # for local development and demos. In production, you'd restrict this to
 # your specific frontend domain(s).
 #
-# WHY ADD THIS NOW?
-# Even though we're building backend-only right now, when we add a frontend
-# later (or test with tools like Postman from a browser), CORS will already
-# be handled. One less thing to debug during the demo.
 # =============================================================================
 app.add_middleware(
     CORSMiddleware,
@@ -217,11 +219,6 @@ async def chat(request: ChatRequest):
     the configured Claude model and returns the response along with
     token usage statistics.
 
-    Currently (Task 1), each request is independent — Claude has no memory
-    of previous messages. In Task 2, the session_id will be used to load
-    conversation history from Redis, giving Claude context of the full
-    conversation.
-
     Raises:
         HTTPException 500: If the Anthropic API call fails (e.g., invalid
             API key, rate limit exceeded, model unavailable).
@@ -235,6 +232,30 @@ async def chat(request: ChatRequest):
         raise HTTPException(
             status_code=503,  # 503 = Service Unavailable
             detail="Anthropic service is not initialized. Check server logs.",
+        )
+
+    # Memory is now part of the request flow, so we guard it explicitly too.
+    if _memory_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory service is not initialized. Check server logs.",
+        )
+
+    # --- Load short-term memory from Redis via Agent Memory Server ----------
+    # Before we call Claude, we load all prior messages for this session.
+    #
+    # This is the key idea behind short-term memory:
+    # Claude itself is stateless, so we reconstruct the conversation by
+    # fetching the session history and sending it back on every request.
+    try:
+        conversation_history = await _memory_service.load_conversation_history(
+            session_id=request.session_id,
+        )
+    except Exception as e:
+        print(f"[Error] Memory load error: {e}")
+        raise HTTPException(
+            status_code = 500,
+            detail=f"Failed to load chat history from memory service: {str(e)}",
         )
 
     # --- Call Claude via our service wrapper ----------------------------------
@@ -251,11 +272,9 @@ async def chat(request: ChatRequest):
     try:
         result = _anthropic_service.chat(
             user_message=request.message,
-            # conversation_history is None for now (Task 1).
-            # In Task 2, we'll load history from Redis here:
-            #   history = await redis_service.get_history(request.session_id)
-            #   result = _anthropic_service.chat(request.message, history)
-            conversation_history=None,
+            # We now pass the session's prior messages so Claude can answer
+            # in the context of the full conversation.
+            conversation_history=conversation_history,
         )
     except Exception as e:
         # Log the full error for debugging (visible in the terminal running uvicorn).
@@ -270,12 +289,32 @@ async def chat(request: ChatRequest):
             detail=f"Failed to get response from Claude: {str(e)}",
         )
 
+    # --- Persist the new conversation turn back into short-term memory -------
+    # Once Claude has responded successfully, we store BOTH sides of the turn:
+    #   1. the user's latest message
+    #   2. Claude's reply
+    #
+    # We store after the model call rather than before so we don't end up with
+    # dangling user-only turns if the Anthropic request fails.
+    try:
+        await _memory_service.store_conversation_turn(
+            session_id=request.session_id,
+            user_message=request.message,
+            assistant_message=result["response"],
+        )
+    except Exception as e:
+        print(f"[ERROR] Memory store error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to store chat history in memory service: {str(e)}",
+        )
+
     # --- Build and return the response ----------------------------------------
     # Map the service result dict to our Pydantic response model.
     # FastAPI automatically serializes this to JSON.
     return ChatResponse(
-        response=result["response"],
+        response=result["response"], #Claude's actual text reply
         session_id=request.session_id,  # echo back for client convenience
-        model=result["model"],
-        usage=result["usage"],
+        model=result["model"], #Tells cleitn which claude model handled it
+        usage=result["usage"], #Returns token counts
     )
