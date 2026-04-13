@@ -1,0 +1,74 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      MEMORY_API_URL: http://agent-memory-server:8000
+    depends_on:
+      agent-memory-server:
+        condition: service_started
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  agent-memory-server:
+    image: "redislabs/agent-memory-server:${AMS_IMAGE_TAG:-0.15.2}"
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+    command:
+      [
+        "agent-memory",
+        "api",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--task-backend=asyncio",
+      ]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${AMS_PORT:-32769}:8000"
+
+  redis:
+    image: "redis:${REDIS_IMAGE_TAG:-8.6.2}"
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  redis-data:

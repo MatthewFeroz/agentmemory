@@ -379,7 +379,7 @@ function App() {
     } catch (error) {
       const errorMessage = {
         role: "assistant",
-        content: `Error: ${error.message}. Is the backend running on port 8000?`,
+        content: `Error: ${error.message}. Check that the backend and memory services are reachable.`,
         timestamp: new Date().toISOString(),
       };
       appendMessage(errorMessage, {

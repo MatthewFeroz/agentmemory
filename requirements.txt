@@ -21,7 +21,7 @@ uvicorn[standard]==0.44.0
 # The official Python SDK for calling Claude models. We use the synchronous
 # client here (Anthropic), not the async one (AsyncAnthropic), to keep the
 # demo simple. The SDK automatically reads ANTHROPIC_API_KEY from the env.
-anthropic==0.94.0
+anthropic==0.94.1
 
 # --- Redis Agent Memory Server client ----------------------------------------
 # This is the Python SDK for Redis Agent Memory Server (AMS). We use it to:
