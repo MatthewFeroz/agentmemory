@@ -91,6 +91,9 @@ function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingLongTermArchive, setLoadingLongTermArchive] = useState(false);
+  const [loadingRememberedFacts, setLoadingRememberedFacts] = useState(false);
+  const [rememberedFacts, setRememberedFacts] = useState([]);
+  const [rememberedFactsError, setRememberedFactsError] = useState("");
   const [longTermChats, setLongTermChats] = useState(() => [
     createDraftLongTermChat("demo-long-term"),
   ]);
@@ -108,6 +111,7 @@ function App() {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const loadLongTermChatsRef = useRef(async () => {});
+  const loadRememberedFactsRef = useRef(async () => {});
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -254,6 +258,31 @@ function App() {
 
   loadLongTermChatsRef.current = loadLongTermChats;
 
+  const loadRememberedFacts = async () => {
+    setLoadingRememberedFacts(true);
+    setRememberedFactsError("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/long-term/facts?user_id=${encodeURIComponent(LONG_TERM_USER_ID)}`
+      );
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setRememberedFacts(data.facts || []);
+    } catch (error) {
+      setRememberedFacts([]);
+      setRememberedFactsError(error.message);
+    } finally {
+      setLoadingRememberedFacts(false);
+    }
+  };
+
+  loadRememberedFactsRef.current = loadRememberedFacts;
+
   const startNewLongTermChat = () => {
     const draftChat = createDraftLongTermChat();
     setLongTermChats((prev) => [draftChat, ...prev]);
@@ -345,6 +374,7 @@ function App() {
       if (requestModeId === "long-term") {
         await loadLongTermChats(requestSessionId);
         await loadLongTermChat(requestSessionId);
+        await loadRememberedFactsRef.current();
       }
     } catch (error) {
       const errorMessage = {
@@ -372,6 +402,7 @@ function App() {
   useEffect(() => {
     if (mode.id !== "long-term") return;
     void loadLongTermChatsRef.current();
+    void loadRememberedFactsRef.current();
   }, [mode.id]);
 
   const savedLongTermChatCount = longTermChats.filter((chat) => !chat.isDraft).length;
@@ -402,43 +433,100 @@ function App() {
 
       <div className="messages">
         {mode.id === "long-term" && (
-          <div className="conversation-toolbar">
-            <div className="conversation-details">
-              <span className="conversation-label">Chat Archive</span>
-              <div className="conversation-picker-wrap">
-                <label className="sr-only" htmlFor="long-term-chat-picker">
-                  Select a previous long-term chat
-                </label>
-                <select
-                  id="long-term-chat-picker"
-                  className="conversation-picker"
-                  value={activeLongTermChatId || ""}
-                  onChange={selectLongTermChat}
-                  disabled={loading || loadingLongTermArchive}
-                >
-                  {longTermChats.map((chat) => (
-                    <option key={chat.id} value={chat.id}>
-                      {chat.label}
-                    </option>
-                  ))}
-                </select>
-                <span className="conversation-value">
-                  {loadingLongTermArchive
-                    ? "Syncing archive..."
-                    : `${savedLongTermChatCount} saved conversation${
-                        savedLongTermChatCount === 1 ? "" : "s"
+          <div className="long-term-layout">
+            <div className="conversation-toolbar">
+              <div className="conversation-details">
+                <span className="conversation-label">Chat Archive</span>
+                <div className="conversation-picker-wrap">
+                  <label className="sr-only" htmlFor="long-term-chat-picker">
+                    Select a previous long-term chat
+                  </label>
+                  <select
+                    id="long-term-chat-picker"
+                    className="conversation-picker"
+                    value={activeLongTermChatId || ""}
+                    onChange={selectLongTermChat}
+                    disabled={loading || loadingLongTermArchive}
+                  >
+                    {longTermChats.map((chat) => (
+                      <option key={chat.id} value={chat.id}>
+                        {chat.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="conversation-value">
+                    {loadingLongTermArchive
+                      ? "Syncing archive..."
+                      : `${savedLongTermChatCount} saved conversation${
+                          savedLongTermChatCount === 1 ? "" : "s"
+                        }`}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="new-chat-btn"
+                onClick={startNewLongTermChat}
+                disabled={loading || loadingLongTermArchive}
+              >
+                New Chat
+              </button>
+            </div>
+
+            <section className="memory-panel">
+              <div className="memory-panel-header">
+                <div>
+                  <span className="conversation-label">Remembered Facts</span>
+                  <h2>Persistent profile for {LONG_TERM_USER_ID}</h2>
+                </div>
+                <span className="memory-panel-status">
+                  {loadingRememberedFacts
+                    ? "Refreshing memory..."
+                    : `${rememberedFacts.length} stored fact${
+                        rememberedFacts.length === 1 ? "" : "s"
                       }`}
                 </span>
               </div>
-            </div>
-            <button
-              type="button"
-              className="new-chat-btn"
-              onClick={startNewLongTermChat}
-              disabled={loading || loadingLongTermArchive}
-            >
-              New Chat
-            </button>
+              <p className="memory-panel-copy">
+                This panel reads the long-term memory layer directly from the
+                backend. Starting a new chat changes the active session, but
+                these facts stay attached to the same user profile.
+              </p>
+
+              {rememberedFactsError && (
+                <div className="memory-panel-empty">
+                  Unable to load remembered facts: {rememberedFactsError}
+                </div>
+              )}
+
+              {!rememberedFactsError && rememberedFacts.length === 0 && !loadingRememberedFacts && (
+                <div className="memory-panel-empty">
+                  No long-term facts stored yet. Try saying things like
+                  “My name is Matthew” or “Our audience prefers hands-on tutorials.”
+                </div>
+              )}
+
+              {rememberedFacts.length > 0 && (
+                <div className="memory-fact-list">
+                  {rememberedFacts.map((fact, index) => (
+                    <article
+                      key={`${fact.text}-${fact.source_session_id || index}`}
+                      className="memory-fact-card"
+                    >
+                      <p className="memory-fact-text">{fact.text}</p>
+                      <div className="memory-fact-meta">
+                        {fact.topics?.length > 0 && (
+                          <span>Topics: {fact.topics.join(", ")}</span>
+                        )}
+                        {fact.source_session_id && (
+                          <span>Source chat: {fact.source_session_id}</span>
+                        )}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
         )}
 
