@@ -277,6 +277,58 @@ class LongTermChatResponse(BaseModel):
 
 
 # =============================================================================
+# LongTermFact - One durable fact remembered across long-term chats
+# =============================================================================
+class LongTermFact(BaseModel):
+    """
+    A normalized long-term fact returned to the frontend.
+
+    This gives the UI a direct view into the "remembered profile" layer so
+    the demo can prove that Redis-backed memory is persisting more than just
+    one transcript.
+    """
+
+    text: str = Field(
+        ...,
+        description="Human-readable fact text stored in long-term memory.",
+    )
+    topics: list[str] = Field(
+        default_factory=list,
+        description="Topic labels attached to the fact for organization.",
+    )
+    entities: list[str] = Field(
+        default_factory=list,
+        description="Key entities or values associated with the fact.",
+    )
+    source_session_id: str | None = Field(
+        default=None,
+        description="Chat session where the fact was first observed, if known.",
+    )
+
+
+# =============================================================================
+# LongTermFactsResponse - Current long-term fact set for one user identity
+# =============================================================================
+class LongTermFactsResponse(BaseModel):
+    """
+    Response for the remembered-facts panel in long-term mode.
+
+    Archive endpoints answer "what happened in a chat?".
+    This endpoint answers "what durable knowledge do we remember about the
+    same user across many chats?".
+    """
+
+    user_id: str = Field(
+        ...,
+        description="Stable user identifier whose facts were loaded.",
+    )
+    facts: list[LongTermFact] = Field(
+        default_factory=list,
+        description="Currently remembered long-term facts for that user.",
+    )
+
+
+# =============================================================================
 # HealthResponse — What the server sends back from GET /health
 # =============================================================================
 class HealthResponse(BaseModel):

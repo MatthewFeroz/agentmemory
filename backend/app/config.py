@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",        # path to the dotenv file to load
         case_sensitive=False,   # env var matching ignores case
+        extra="ignore",         # ignore AMS-only vars that belong to another process
     )
 
     # ---- Required settings --------------------------------------------------

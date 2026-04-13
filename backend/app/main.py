@@ -34,6 +34,7 @@ from backend.app.config import get_settings  # our cached settings factory
 from backend.app.models import (             # request/response schemas
     ChatRequest,
     ChatResponse,
+    LongTermFactsResponse,
     LongTermChatResponse,
     LongTermChatsResponse,
     HealthResponse,
@@ -350,6 +351,72 @@ async def get_long_term_chat(
         session_id=chat["session_id"],
         label=chat["label"],
         messages=chat["messages"],
+    )
+
+
+# =============================================================================
+# GET /long-term/facts - Load the durable remembered facts for one user
+# =============================================================================
+# Archived chats answer "what happened in each conversation?"
+# This endpoint answers "what profile-level knowledge survived across them?"
+#
+# That distinction is important for the interview/demo because it makes the
+# Redis-backed long-term memory layer visible instead of leaving it hidden
+# behind the model's natural-language responses.
+# =============================================================================
+@app.get(
+    "/long-term/facts",
+    response_model=LongTermFactsResponse,
+    tags=["Chat"],
+    summary="Load remembered long-term facts for a user",
+)
+@app.get(
+    "/api/long-term/facts",
+    response_model=LongTermFactsResponse,
+    include_in_schema=False,
+)
+async def get_long_term_facts(
+    user_id: str | None = Query(
+        default=None,
+        description="Stable user identifier whose remembered facts should be loaded.",
+    ),
+    limit: int = Query(
+        default=12,
+        ge=1,
+        le=50,
+        description="Maximum number of remembered facts to return.",
+    ),
+):
+    """
+    Return the current long-term fact set for one stable user identity.
+
+    This endpoint deliberately does not call Claude.
+    It reads the memory layer directly so the frontend can show what AMS and
+    Redis have persisted independently of the current chat response.
+    """
+    if _memory_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory service is not initialized. Check server logs.",
+        )
+
+    resolved_user_id = _resolve_long_term_user_id(user_id)
+
+    try:
+        facts = await _memory_service.list_long_term_facts(
+            user_id=resolved_user_id,
+            limit=limit,
+        )
+    except Exception as e:
+        print(f"[ERROR] Long-term facts load error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load long-term facts: {str(e)}",
+        )
+
+    return LongTermFactsResponse(
+        user_id=resolved_user_id,
+        facts=facts,
     )
 
 

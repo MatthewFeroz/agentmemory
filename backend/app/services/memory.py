@@ -449,6 +449,46 @@ class MemoryService:
 
         return self._rank_facts_for_query(facts=facts, query=query, limit=limit)
 
+    async def list_long_term_facts(
+        self,
+        user_id: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        Return the user's currently remembered long-term facts.
+
+        This powers the frontend "Remembered Facts" panel.
+
+        Why a separate method instead of reusing search_long_term_facts()?
+        Search answers: "which facts are relevant to this prompt right now?"
+        This method answers: "what durable facts are stored for this user at all?"
+        Those are related, but they are different demo questions.
+        """
+        profile_memory = await self._load_long_term_profile(user_id)
+
+        # The hidden profile session stores facts in `working_memory.memories`.
+        # Each memory record is already an AMS-native concept, so we convert it
+        # into a plain dictionary for the API layer rather than leaking SDK
+        # models across the app.
+        facts: list[dict] = []
+        for memory in reversed(profile_memory.memories):
+            if not hasattr(memory, "text"):
+                continue
+
+            facts.append(
+                {
+                    "text": memory.text,
+                    "topics": list(getattr(memory, "topics", []) or []),
+                    "entities": list(getattr(memory, "entities", []) or []),
+                    "source_session_id": getattr(memory, "session_id", None),
+                }
+            )
+
+            if len(facts) >= limit:
+                break
+
+        return facts
+
     def _build_chat_data(
         self,
         existing_data: dict | None,

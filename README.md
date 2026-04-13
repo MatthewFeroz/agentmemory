@@ -1,89 +1,28 @@
-# Redis DevRel - AI Chat App
+# Redis DevRel Memory Demo
 
-Full-stack starter for the Redis DevRel technical project.
+Short full-stack demo for showing how Redis-backed memory changes an LLM chat experience over time.
 
-This repo contains:
-- a documented FastAPI backend that connects to Anthropic's Claude API
-- a React + Vite frontend for chatting with the backend
+## Project Status
 
-The code is intentionally heavily commented so the implementation can be
-explained line-by-line during a technical presentation.
+This repo currently has:
+- a FastAPI backend that talks to Claude
+- a React frontend with three memory modes
+- Redis Agent Memory Server handling working memory and long-term memory storage
 
-## Repo Layout
+## Three Phases
 
-```text
-backend/
-  app/
-    main.py             <- FastAPI app, endpoints (/chat, /health)
-    config.py           <- Environment variable loading via pydantic-settings
-    models.py           <- Pydantic request/response schemas
-    services/
-      anthropic.py      <- Anthropic SDK wrapper (Claude client)
-      memory.py         <- Agent Memory Server wrapper for short-term memory
-frontend/
-  src/
-    App.jsx             <- Main chat UI
-  package.json          <- Frontend dependencies and scripts
-  bun.lock              <- Bun lockfile
-.env.example            <- Template for required environment variables
-requirements.txt        <- Pinned Python dependencies
-```
+### Phase 1: No Memory
+The assistant is stateless. Every message is treated as a brand-new request.
 
-## Quick Start
+### Phase 2: Short-Term Memory
+The assistant remembers the current conversation thread. This is session memory tied to a `session_id`.
 
-```bash
-# 1. Create and activate a virtual environment for the backend
-python -m venv .venv
-source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+### Phase 3: Long-Term Memory
+The assistant remembers facts across chats. This uses a stable `user_id`, archived conversations, and a remembered-facts layer backed by Redis through Agent Memory Server.
 
-# 2. Install backend dependencies
-pip install -r requirements.txt
+## Current Demo State
 
-# 3. Install frontend dependencies with Bun
-cd frontend
-bun install
-cd ..
-
-# 4. Set up your environment variables
-cp .env.example .env
-# Edit .env and add your ANTHROPIC_API_KEY and MEMORY_API_URL if needed
-
-# 5. Start the backend
-uvicorn backend.app.main:app --reload --port 8000
-
-# 6. Start the frontend
-cd frontend
-bun run dev
-```
-
-Open:
-- `http://localhost:8000/docs` for the FastAPI Swagger UI
-- `http://localhost:5173` for the frontend chat app
-
-## API Endpoints
-
-| Method | Path      | Description                            |
-|--------|-----------|----------------------------------------|
-| GET    | `/health` | Server health check + model info       |
-| POST   | `/chat`   | Send a message to Claude, get a reply  |
-
-## Example Usage
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Send a chat message
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hi, my name is Matthew!", "session_id": "demo-1"}'
-```
-
-## Tech Stack
-
-- FastAPI - async Python web framework with auto-generated docs
-- Anthropic SDK - official Python client for Claude
-- Agent Memory Server client - short-term memory via Redis-backed working memory
-- React 19 + Vite - frontend chat interface
-- Bun - frontend package manager and lockfile
-- pydantic-settings - typed environment variable management
+The app now supports:
+- `No Memory` mode
+- `Short-Term Memory` mode
+- `Long-Term Memory` mode with chat archive and remembered facts panel
