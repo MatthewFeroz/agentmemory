@@ -1,12 +1,14 @@
 // =============================================================================
 // App.jsx — Main chat interface for the Redis DevRel Content Strategist
 // =============================================================================
-// This is the entire frontend in a single component. It's intentionally simple:
-//   - A header with the app title
-//   - A scrollable message area showing the conversation
-//   - A text input + send button at the bottom
+// Single-component React app with three memory modes, each with its own
+// color theme based on the official Redis brand palette.
 //
-// It talks to our FastAPI backend at http://localhost:8000/chat via fetch().
+// Mode 1: No Memory      — classic Redis red (#FF4438) on dark (#091A23)
+// Mode 2: Short-Term     — inverted: light background, red accents
+// Mode 3: Long-Term      — modern Redis: chartreuse yellow (#DCFF1E) + navy
+//
+// Talks to our FastAPI backend at /api/chat via the Vite dev proxy.
 // =============================================================================
 
 import { useState, useRef, useEffect } from "react";
@@ -14,106 +16,138 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 // --- Configuration -----------------------------------------------------------
-// The URL of our FastAPI backend. In development, Vite runs on port 5173 and
-// the backend runs on port 8000. We've set up a Vite proxy (in vite.config.js)
-// so we can just use "/api/chat" instead of "http://localhost:8000/chat".
-// This avoids CORS issues during development.
 const API_URL = "/api";
 
+// --- Mode definitions --------------------------------------------------------
+// Each mode has an id, a display label, a CSS class for theming, and
+// descriptive text shown in the empty state. The session_id changes per mode
+// so conversations don't bleed across modes during the demo.
+const MODES = [
+  {
+    id: "none",
+    label: "No Memory",
+    themeClass: "",                          // default theme (no extra class)
+    heading: "No Memory Mode",
+    description:
+      "Each message is independent. The assistant has no context of previous messages — every request starts from zero.",
+    session: "demo-no-memory",
+  },
+  {
+    id: "short-term",
+    label: "Short-Term Memory",
+    themeClass: "theme-short-term",
+    heading: "Short-Term Memory",
+    description:
+      "The assistant remembers everything from this session. Conversation history is loaded from Redis on every request.",
+    session: "demo-short-term",
+  },
+  {
+    id: "long-term",
+    label: "Long-Term Memory",
+    themeClass: "theme-long-term",
+    heading: "Long-Term Memory",
+    description:
+      "The assistant remembers you across sessions. Facts and preferences persist in Redis even after you start a new conversation.",
+    session: "demo-long-term",
+  },
+];
+
+// --- Suggestion chips — placeholder prompts for the demo --------------------
+// These appear in the empty state. Clicking one sends that message directly.
+// Kept as placeholders so you can craft the narrative story for the demo later.
+const SUGGESTIONS = [
+  "Template prompt one",
+  "Template prompt two",
+  "Template prompt three",
+];
+
+// --- Utility: format a timestamp for display ---------------------------------
 function formatMessageTime(timestamp) {
   if (!timestamp) return null;
-
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return null;
-
-  return date.toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function App() {
   // --- State -----------------------------------------------------------------
-  // messages: array of { role: "user"|"assistant", content: "...", usage?: {} }
-  // Each message matches the shape we get from the Anthropic API, which makes
-  // it easy to display and (later) to send back as conversation history.
   const [messages, setMessages] = useState([]);
-
-  // input: the current text in the input field (controlled component)
   const [input, setInput] = useState("");
-
-  // loading: true while we're waiting for Claude's response.
-  // We use this to show a loading indicator and disable the send button.
   const [loading, setLoading] = useState(false);
 
-  // --- Refs ------------------------------------------------------------------
-  // messagesEndRef: a dummy div at the bottom of the messages area.
-  // We scroll this into view whenever a new message is added, which keeps
-  // the chat auto-scrolled to the latest message.
-  const messagesEndRef = useRef(null);
+  // activeMode is the index into MODES (0 = no memory, 1 = short-term, 2 = long-term)
+  const [activeMode, setActiveMode] = useState(0);
 
-  // inputRef: reference to the text input so we can auto-focus it
+  // Derived: the current mode object
+  const mode = MODES[activeMode];
+
+  // --- Refs ------------------------------------------------------------------
+  const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
   // --- Auto-scroll to bottom when messages change ----------------------------
   useEffect(() => {
-    // scrollIntoView with "smooth" gives a nice animated scroll effect
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]); // trigger on new messages OR loading state change
+  }, [messages, loading]);
+
+  // --- Apply the theme class to the document body ----------------------------
+  // We put the theme class on <body> so that CSS variables cascade to everything,
+  // including elements outside the React tree (scrollbars, browser chrome hints).
+  useEffect(() => {
+    // Remove all theme classes first, then add the active one
+    document.body.classList.remove("theme-short-term", "theme-long-term");
+    if (mode.themeClass) {
+      document.body.classList.add(mode.themeClass);
+    }
+  }, [mode.themeClass]);
+
+  // --- Switch mode -----------------------------------------------------------
+  // Clears the conversation when switching modes so each demo starts fresh.
+  const switchMode = (index) => {
+    if (index === activeMode) return; // already active
+    setActiveMode(index);
+    setMessages([]);
+    setInput("");
+  };
 
   // --- Send a message to the backend -----------------------------------------
-  const sendMessage = async () => {
-    // Guard: don't send empty messages or send while already loading
-    const trimmed = input.trim();
+  const sendMessage = async (overrideText) => {
+    const trimmed = (overrideText || input).trim();
     if (!trimmed || loading) return;
 
-    // 1. Add the user's message to the chat immediately (optimistic UI).
-    //    We don't wait for the API — the user sees their message right away.
+    // Optimistic UI: show the user message immediately
     const userMessage = {
       role: "user",
       content: trimmed,
       timestamp: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, userMessage]);
-
-    // 2. Clear the input field so the user can start typing their next message
     setInput("");
-
-    // 3. Show the loading indicator
     setLoading(true);
 
     try {
-      // 4. Send the message to our FastAPI backend.
-      //    POST /api/chat with { message, session_id }
-      //    The backend forwards this to the Anthropic API and returns
-      //    Claude's response.
       const response = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: trimmed,
-          session_id: "demo-session", // hardcoded for now — Redis will use this later
+          session_id: mode.session,
         }),
       });
 
-      // 5. Parse the JSON response from our backend
       if (!response.ok) {
         throw new Error(`Server error: ${response.status}`);
       }
       const data = await response.json();
 
-      // 6. Add Claude's response to the chat.
-      //    We store the usage data too so we can display token counts.
       const assistantMessage = {
         role: "assistant",
         content: data.response,
         timestamp: new Date().toISOString(),
-        usage: data.usage, // { input_tokens, output_tokens }
+        usage: data.usage,
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
-      // If the API call fails, show the error as an assistant message
-      // so the user can see what went wrong without opening dev tools.
       const errorMessage = {
         role: "assistant",
         content: `Error: ${error.message}. Is the backend running on port 8000?`,
@@ -121,7 +155,6 @@ function App() {
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
-      // 7. Hide loading indicator and refocus the input
       setLoading(false);
       inputRef.current?.focus();
     }
@@ -129,10 +162,8 @@ function App() {
 
   // --- Handle Enter key to send ----------------------------------------------
   const handleKeyDown = (e) => {
-    // Send on Enter, but not on Shift+Enter (which should add a newline
-    // if we ever switch to a textarea)
     if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault(); // prevent form submission / newline
+      e.preventDefault();
       sendMessage();
     }
   };
@@ -143,72 +174,95 @@ function App() {
       {/* --- Header --------------------------------------------------------- */}
       <header className="header">
         <div className="header-dot" />
-        <h1>Redis DevRel Content Strategist</h1>
-        <p>Powered by Claude Haiku 4.5</p>
+        <h1>
+          <span className="header-redis">Redis</span> DevRel
+        </h1>
+        <span className="header-subtitle">AI Content Strategist</span>
       </header>
+
+      {/* --- Mode switcher -------------------------------------------------- */}
+      <div className="mode-bar">
+        <div className="mode-switcher">
+          {MODES.map((m, i) => (
+            <button
+              key={m.id}
+              className={`mode-btn${i === activeMode ? " active" : ""}`}
+              onClick={() => switchMode(i)}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* --- Messages area -------------------------------------------------- */}
       <div className="messages">
-        {/* If no messages yet, show a welcome prompt */}
+        {/* Empty state: mode description + suggestion chips */}
         {messages.length === 0 && !loading && (
           <div className="empty-state">
-            <h2>What should we create next?</h2>
-            <p>
-              I'm your DevRel content strategist. Tell me about recent launches,
-              audience feedback, or upcoming events — and I'll help brainstorm
-              content ideas and plan your editorial roadmap.
-            </p>
+            <h2>{mode.heading}</h2>
+            <p>{mode.description}</p>
+            <div className="suggestion-chips">
+              {SUGGESTIONS.map((text) => (
+                <button
+                  key={text}
+                  className="chip"
+                  onClick={() => sendMessage(text)}
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
         {/* Render each message as a bubble */}
         {messages.map((msg, i) => {
           const timeLabel = formatMessageTime(msg.timestamp);
-
           return (
-          <div key={i} className={`message-row ${msg.role}`}>
-            <div className={`message-stack ${msg.role}`}>
-              <div className={`message ${msg.role}`}>
-                {msg.role === "assistant" ? (
-                  <div className="message-md">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={{
-                        a: ({ node, ...props }) => {
-                          void node;
-                          return (
-                            <a
-                              {...props}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            />
-                          );
-                        },
-                      }}
-                    >
-                      {msg.content}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  msg.content
-                )}
-              </div>
+            <div key={i} className={`message-row ${msg.role}`}>
+              <div className={`message-stack ${msg.role}`}>
+                <div className={`message ${msg.role}`}>
+                  {msg.role === "assistant" ? (
+                    <div className="message-md">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          a: ({ node, ...props }) => {
+                            void node;
+                            return (
+                              <a
+                                {...props}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              />
+                            );
+                          },
+                        }}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
+                    </div>
+                  ) : (
+                    msg.content
+                  )}
+                </div>
 
-              <div className={`message-meta ${msg.role}`}>
-                {timeLabel && <span>{timeLabel}</span>}
-                {msg.role === "assistant" && msg.usage && (
-                  <span>
-                    {msg.usage.input_tokens} input / {msg.usage.output_tokens} output
-                    {" "}tokens
-                  </span>
-                )}
+                <div className={`message-meta ${msg.role}`}>
+                  {timeLabel && <span>{timeLabel}</span>}
+                  {msg.role === "assistant" && msg.usage && (
+                    <span>
+                      {msg.usage.input_tokens} input / {msg.usage.output_tokens}{" "}
+                      output tokens
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
           );
         })}
 
-        {/* Loading indicator — three pulsing dots */}
+        {/* Loading indicator */}
         {loading && (
           <div className="loading">
             <div className="loading-dot" />
@@ -217,7 +271,6 @@ function App() {
           </div>
         )}
 
-        {/* Invisible anchor for auto-scroll */}
         <div ref={messagesEndRef} />
       </div>
 
@@ -233,7 +286,7 @@ function App() {
           disabled={loading}
           autoFocus
         />
-        <button onClick={sendMessage} disabled={loading || !input.trim()}>
+        <button onClick={() => sendMessage()} disabled={loading || !input.trim()}>
           Send
         </button>
       </div>
