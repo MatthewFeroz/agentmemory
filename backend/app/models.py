@@ -15,6 +15,8 @@
 #     cluttering the endpoint definitions
 # =============================================================================
 
+from typing import Literal  # constrains a field to an exact set of string values
+
 from pydantic import BaseModel, Field
 
 
@@ -28,7 +30,8 @@ class ChatRequest(BaseModel):
     Example JSON body:
     {
         "message": "Hi, my name is Matthew!",
-        "session_id": "user-123-session-abc"
+        "session_id": "user-123-session-abc",
+        "memory_mode": "short-term"
     }
     """
 
@@ -61,6 +64,41 @@ class ChatRequest(BaseModel):
             "history in a future phase."
         ),
         examples=["user-123-session-abc"],
+    )
+
+    # memory_mode tells the backend which "agent behavior" to use.
+    #
+    # Why Literal instead of plain str?
+    # - Validation: FastAPI rejects unsupported values automatically.
+    # - Documentation: the generated /docs page shows the allowed values.
+    # - Safety: it prevents typos like "shortterm" from silently falling
+    #   through to the wrong behavior.
+    memory_mode: Literal["none", "short-term", "long-term"] = Field(
+        default="none",
+        description=(
+            "How the backend should handle memory for this request. "
+            "'none' keeps the request stateless, 'short-term' uses session "
+            "history, and 'long-term' combines session history with "
+            "user-level fact memory across chats."
+        ),
+        examples=["short-term"],
+    )
+
+    # user_id is the stable identity that ties multiple long-term chats
+    # together. This is different from session_id:
+    # - session_id identifies one conversation thread
+    # - user_id identifies the same person across conversation threads
+    #
+    # That distinction is what allows the demo to prove long-term memory:
+    # new chat, same user, remembered facts.
+    user_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable user identifier used to link multiple long-term "
+            "conversations together. Primarily used when memory_mode is "
+            "'long-term'."
+        ),
+        examples=["demo-long-term-user"],
     )
 
 
@@ -117,6 +155,124 @@ class ChatResponse(BaseModel):
             "Token usage statistics. Contains 'input_tokens' and "
             "'output_tokens' counts from the Anthropic API."
         ),
+    )
+
+    # Echo the resolved user_id when the backend used one. This helps the
+    # frontend confirm which long-term identity was active for the request.
+    user_id: str | None = Field(
+        default=None,
+        description=(
+            "Resolved stable user identifier for the request, when applicable."
+        ),
+    )
+
+
+# =============================================================================
+# ChatMessage â€” A single chat message in API responses
+# =============================================================================
+class ChatMessage(BaseModel):
+    """
+    A normalized chat message returned by archive endpoints.
+
+    We use the same simple shape the frontend already understands:
+    role + content. A timestamp is included when it is available from
+    stored memory records.
+    """
+
+    role: Literal["user", "assistant"] = Field(
+        ...,
+        description="Whether the message came from the user or assistant.",
+    )
+    content: str = Field(
+        ...,
+        description="The message text.",
+    )
+    timestamp: str | None = Field(
+        default=None,
+        description="ISO timestamp for when the message was created, if known.",
+    )
+
+
+# =============================================================================
+# LongTermChatSummary â€” Metadata shown in the long-term chat picker
+# =============================================================================
+class LongTermChatSummary(BaseModel):
+    """
+    Lightweight metadata about an archived long-term conversation.
+
+    This keeps the list endpoint fast and UI-friendly: the frontend can
+    show the available chats without loading every full transcript up front.
+    """
+
+    session_id: str = Field(
+        ...,
+        description="Unique identifier for the archived chat session.",
+    )
+    label: str = Field(
+        ...,
+        description="Human-friendly label for the chat.",
+    )
+    message_count: int = Field(
+        ...,
+        description="Total number of stored messages in the chat.",
+    )
+    last_updated: str | None = Field(
+        default=None,
+        description="ISO timestamp of the most recent activity in the chat.",
+    )
+    preview: str | None = Field(
+        default=None,
+        description="Short preview of the most recent user-facing content.",
+    )
+
+
+# =============================================================================
+# LongTermChatsResponse â€” List of archived chats for one user
+# =============================================================================
+class LongTermChatsResponse(BaseModel):
+    """
+    Response for the long-term chat archive listing endpoint.
+
+    It tells the frontend which stable user identity was used and returns
+    the archived chats that belong to that identity.
+    """
+
+    user_id: str = Field(
+        ...,
+        description="Stable user identifier used for the archive lookup.",
+    )
+    chats: list[LongTermChatSummary] = Field(
+        ...,
+        description="Archived long-term chats for the user.",
+    )
+
+
+# =============================================================================
+# LongTermChatResponse â€” Full transcript for one archived chat
+# =============================================================================
+class LongTermChatResponse(BaseModel):
+    """
+    Response for loading one archived long-term conversation.
+
+    The frontend uses this when the user selects a previous chat from the
+    archive dropdown and needs the transcript restored.
+    """
+
+    user_id: str = Field(
+        ...,
+        description="Stable user identifier that owns the chat.",
+    )
+    session_id: str = Field(
+        ...,
+        description="The archived chat session that was loaded.",
+    )
+    label: str = Field(
+        ...,
+        description="Human-friendly label for the archived chat.",
+    )
+    messages: list[ChatMessage] = Field(
+        ...,
+        description="Transcript of the archived chat.",
     )
 
 

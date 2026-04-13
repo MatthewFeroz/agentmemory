@@ -65,6 +65,32 @@ class Settings(BaseSettings):
     # visible without forcing extra complexity into the first version.
     memory_namespace: str | None = None
 
+    # Interview/demo note:
+    # Agent Memory Server's FULL long-term semantic search typically needs an
+    # embedding-capable provider configured on the memory server itself.
+    # Anthropic is used here for chat completions, but Anthropic does not
+    # supply embeddings for AMS long-term vector search. In practice that means:
+    # - short-term Redis-backed working memory works with the current setup
+    # - long-term archive storage works with the current setup
+    # - AMS native long-term semantic retrieval may require extra server-side
+    #   configuration (for example, an OPENAI_API_KEY on the AMS process)
+    #
+    # We keep that complexity out of this backend config because those values
+    # belong to the memory server process, not to this FastAPI app.
+
+    # Stable demo identity used when the frontend does not explicitly send a
+    # user_id for long-term memory mode. This lets us demonstrate "new chat,
+    # same remembered person" without requiring an auth system.
+    default_long_term_user_id: str = "demo-long-term-user"
+
+    # Enable this only when the Agent Memory Server process is configured with
+    # a working embedding provider for long-term semantic search.
+    #
+    # Default is False because this repo currently ships only the Anthropic
+    # chat key for the FastAPI app, not the extra AMS-side embedding config
+    # needed for reliable vector search.
+    prefer_ams_long_term_search: bool = False
+
     # ---- Optional settings with sensible defaults ---------------------------
 
     # Which Claude model to use for chat completions.

@@ -67,7 +67,12 @@ class AnthropicService:
         # API call happens when we call client.messages.create().
         self._client = Anthropic(api_key=settings.anthropic_api_key)
 
-    def chat(self, user_message: str, conversation_history: list[dict] | None = None) -> dict:
+    def chat(
+        self,
+        user_message: str,
+        conversation_history: list[dict] | None = None,
+        memory_context: str | None = None,
+    ) -> dict:
         """
         Send a message to Claude and return the response.
 
@@ -82,6 +87,11 @@ class AnthropicService:
                 Anthropic's format: [{"role": "user"|"assistant", "content": "..."}].
                 Defaults to None (no history), which means each request is
                 independent — Claude has no memory of previous messages.
+
+            memory_context: Optional long-term memory context appended to the
+                system prompt. We use this for facts remembered across chats
+                so the transcript stays honest while Claude still gets the
+                extra context.
 
         Returns:
             A dict with keys:
@@ -116,6 +126,23 @@ class AnthropicService:
             "content": user_message,  # the actual text
         })
 
+        # --- Build the final system prompt ----------------------------------
+        # Session history belongs in the messages array because it is the
+        # actual transcript. Long-term facts belong in the system prompt
+        # because they are server-supplied context, not literal prior turns.
+        system_prompt = self._settings.system_prompt
+        if memory_context:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "Remembered long-term context:\n"
+                "These facts were retrieved from Redis-backed memory via "
+                "Agent Memory Server. They are available context for this "
+                "conversation even if the current session is new. If the user "
+                "asks what you remember, answer from these facts directly and "
+                "do not claim you have no memory.\n"
+                f"{memory_context}"
+            )
+
         # --- Call the Anthropic Messages API ---------------------------------
         # client.messages.create() sends an HTTP POST to Anthropic's servers
         # and blocks until Claude generates a complete response.
@@ -132,7 +159,7 @@ class AnthropicService:
         api_response = self._client.messages.create(
             model=self._settings.anthropic_model,
             max_tokens=self._settings.max_tokens,
-            system=self._settings.system_prompt,
+            system=system_prompt,
             messages=messages,
         )
 

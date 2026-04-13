@@ -27,13 +27,15 @@
 
 from contextlib import asynccontextmanager  # for lifespan management
 
-from fastapi import FastAPI, HTTPException  # web framework + error handling
+from fastapi import FastAPI, HTTPException, Query  # web framework + error handling
 from fastapi.middleware.cors import CORSMiddleware  # cross-origin requests
 
 from backend.app.config import get_settings  # our cached settings factory
 from backend.app.models import (             # request/response schemas
     ChatRequest,
     ChatResponse,
+    LongTermChatResponse,
+    LongTermChatsResponse,
     HealthResponse,
 )
 from backend.app.services.anthropic import AnthropicService  # Claude wrapper
@@ -49,6 +51,40 @@ from backend.app.services.memory import MemoryService         # Redis-backed mem
 # =============================================================================
 _anthropic_service: AnthropicService | None = None
 _memory_service: MemoryService | None = None
+
+
+def _resolve_long_term_user_id(request_user_id: str | None) -> str:
+    """
+    Resolve the stable identity used for long-term memory.
+
+    Why have a separate helper for this?
+    The important architectural idea in the demo is:
+    - `session_id` = one chat thread
+    - `user_id` = the same person across many chat threads
+
+    By centralizing that rule here, every long-term endpoint uses the same
+    identity behavior and the reasoning stays easy to explain.
+    """
+    settings = get_settings()
+    return request_user_id or settings.default_long_term_user_id
+
+
+def _format_long_term_context(remembered_facts: list[str]) -> str | None:
+    """
+    Convert stored fact strings into prompt-ready context text.
+
+    We inject this into the system prompt for long-term mode so Claude can use
+    remembered facts without us pretending those facts were literal chat turns.
+    """
+    if not remembered_facts:
+        return None
+
+    bullet_lines = "\n".join(f"- {fact}" for fact in remembered_facts)
+    return (
+        "Use these remembered facts when they are relevant and consistent with "
+        "the user's current request:\n"
+        f"{bullet_lines}"
+    )
 
 
 # =============================================================================
@@ -173,6 +209,11 @@ app.add_middleware(
     tags=["System"],                # groups this endpoint in the /docs UI
     summary="Check if the server is running",
 )
+@app.get(
+    "/api/health",
+    response_model=HealthResponse,
+    include_in_schema=False,
+)
 async def health_check():
     """
     Returns the server status and currently configured Claude model.
@@ -186,6 +227,129 @@ async def health_check():
     return HealthResponse(
         status="ok",
         model=settings.anthropic_model,
+    )
+
+
+# =============================================================================
+# GET /long-term/chats â€” List archived chats for one long-term identity
+# =============================================================================
+# This endpoint supports the frontend's "chat archive" UI for long-term mode.
+# It answers the question: "for this stable user identity, what conversation
+# threads already exist?"
+# =============================================================================
+@app.get(
+    "/long-term/chats",
+    response_model=LongTermChatsResponse,
+    tags=["Chat"],
+    summary="List archived long-term chats for a user",
+)
+@app.get(
+    "/api/long-term/chats",
+    response_model=LongTermChatsResponse,
+    include_in_schema=False,
+)
+async def list_long_term_chats(
+    user_id: str | None = Query(
+        default=None,
+        description="Stable user identifier whose archived chats should be listed.",
+    ),
+    limit: int = Query(
+        default=50,
+        ge=1,
+        le=100,
+        description="Maximum number of archived chats to return.",
+    ),
+):
+    """
+    Return archived long-term chat summaries for one stable user identity.
+
+    This is the archive/list side of long-term memory:
+    - multiple sessions can belong to one user_id
+    - the frontend lists those sessions in a dropdown
+    - selecting one later loads the full transcript
+    """
+    if _memory_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory service is not initialized. Check server logs.",
+        )
+
+    resolved_user_id = _resolve_long_term_user_id(user_id)
+
+    try:
+        chats = await _memory_service.list_long_term_chats(
+            user_id=resolved_user_id,
+            limit=limit,
+        )
+    except Exception as e:
+        print(f"[ERROR] Long-term archive list error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list long-term chats: {str(e)}",
+        )
+
+    return LongTermChatsResponse(
+        user_id=resolved_user_id,
+        chats=chats,
+    )
+
+
+# =============================================================================
+# GET /long-term/chats/{session_id} â€” Load one archived chat transcript
+# =============================================================================
+# The list endpoint above gives us chat summaries. This endpoint loads the
+# full transcript for whichever archived session the user selects.
+# =============================================================================
+@app.get(
+    "/long-term/chats/{session_id}",
+    response_model=LongTermChatResponse,
+    tags=["Chat"],
+    summary="Load one archived long-term chat transcript",
+)
+@app.get(
+    "/api/long-term/chats/{session_id}",
+    response_model=LongTermChatResponse,
+    include_in_schema=False,
+)
+async def get_long_term_chat(
+    session_id: str,
+    user_id: str | None = Query(
+        default=None,
+        description="Stable user identifier that owns the archived chat.",
+    ),
+):
+    """
+    Return the stored transcript for one archived long-term chat.
+
+    The `user_id` filter matters for correctness: it ensures we load the chat
+    inside the right long-term identity rather than treating session IDs as
+    global, user-less identifiers.
+    """
+    if _memory_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory service is not initialized. Check server logs.",
+        )
+
+    resolved_user_id = _resolve_long_term_user_id(user_id)
+
+    try:
+        chat = await _memory_service.load_long_term_chat(
+            session_id=session_id,
+            user_id=resolved_user_id,
+        )
+    except Exception as e:
+        print(f"[ERROR] Long-term archive load error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load long-term chat: {str(e)}",
+        )
+
+    return LongTermChatResponse(
+        user_id=resolved_user_id,
+        session_id=chat["session_id"],
+        label=chat["label"],
+        messages=chat["messages"],
     )
 
 
@@ -211,6 +375,11 @@ async def health_check():
     tags=["Chat"],                 # groups this endpoint in the /docs UI
     summary="Send a message to Claude and get a response",
 )
+@app.post(
+    "/api/chat",
+    response_model=ChatResponse,
+    include_in_schema=False,
+)
 async def chat(request: ChatRequest):
     """
     Process a chat message through Claude.
@@ -234,29 +403,59 @@ async def chat(request: ChatRequest):
             detail="Anthropic service is not initialized. Check server logs.",
         )
 
-    # Memory is now part of the request flow, so we guard it explicitly too.
-    if _memory_service is None:
+    # Long-term memory needs a stable identity that survives across many chat
+    # sessions. Short-term memory does not, because it lives entirely inside a
+    # single session_id.
+    resolved_user_id = (
+        _resolve_long_term_user_id(request.user_id)
+        if request.memory_mode == "long-term"
+        else None
+    )
+
+    uses_working_memory = request.memory_mode in {"short-term", "long-term"}
+
+    # Only requests that use memory depend on the memory service.
+    if uses_working_memory and _memory_service is None:
         raise HTTPException(
             status_code=503,
             detail="Memory service is not initialized. Check server logs.",
         )
 
+    conversation_history: list[dict] | None = None
+
     # --- Load short-term memory from Redis via Agent Memory Server ----------
-    # Before we call Claude, we load all prior messages for this session.
-    #
-    # This is the key idea behind short-term memory:
-    # Claude itself is stateless, so we reconstruct the conversation by
-    # fetching the session history and sending it back on every request.
-    try:
-        conversation_history = await _memory_service.load_conversation_history(
-            session_id=request.session_id,
-        )
-    except Exception as e:
-        print(f"[Error] Memory load error: {e}")
-        raise HTTPException(
-            status_code = 500,
-            detail=f"Failed to load chat history from memory service: {str(e)}",
-        )
+    # Requests in "none" mode stay stateless by skipping both the load and
+    # store steps. Short-term and long-term currently share working memory.
+    if uses_working_memory:
+        try:
+            conversation_history = await _memory_service.load_conversation_history(
+                session_id=request.session_id,
+                user_id=resolved_user_id,
+            )
+        except Exception as e:
+            print(f"[Error] Memory load error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load chat history from memory service: {str(e)}",
+            )
+
+    # Long-term mode is more than just "load the current session transcript."
+    # We also search persisted facts tied to the same user_id so Claude can
+    # remember information across brand-new chat sessions.
+    memory_context: str | None = None
+    if request.memory_mode == "long-term":
+        try:
+            remembered_facts = await _memory_service.search_long_term_facts(
+                user_id=resolved_user_id,
+                query=request.message,
+            )
+            memory_context = _format_long_term_context(remembered_facts)
+        except Exception as e:
+            print(f"[ERROR] Long-term memory search error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to search long-term memory: {str(e)}",
+            )
 
     # --- Call Claude via our service wrapper ----------------------------------
     # We wrap this in a try/except because the Anthropic API can fail for
@@ -275,6 +474,7 @@ async def chat(request: ChatRequest):
             # We now pass the session's prior messages so Claude can answer
             # in the context of the full conversation.
             conversation_history=conversation_history,
+            memory_context=memory_context,
         )
     except Exception as e:
         # Log the full error for debugging (visible in the terminal running uvicorn).
@@ -296,18 +496,36 @@ async def chat(request: ChatRequest):
     #
     # We store after the model call rather than before so we don't end up with
     # dangling user-only turns if the Anthropic request fails.
-    try:
-        await _memory_service.store_conversation_turn(
-            session_id=request.session_id,
-            user_message=request.message,
-            assistant_message=result["response"],
-        )
-    except Exception as e:
-        print(f"[ERROR] Memory store error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to store chat history in memory service: {str(e)}",
-        )
+    if uses_working_memory:
+        try:
+            await _memory_service.store_conversation_turn(
+                session_id=request.session_id,
+                user_message=request.message,
+                assistant_message=result["response"],
+                user_id=resolved_user_id,
+            )
+        except Exception as e:
+            print(f"[ERROR] Memory store error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to store chat history in memory service: {str(e)}",
+            )
+
+    # Persist explicit facts only for long-term mode.
+    # This is what allows "start a new chat and still remember my name" demos.
+    if request.memory_mode == "long-term":
+        try:
+            await _memory_service.store_long_term_facts(
+                session_id=request.session_id,
+                user_id=resolved_user_id,
+                user_message=request.message,
+            )
+        except Exception as e:
+            print(f"[ERROR] Long-term memory store error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to store long-term memory: {str(e)}",
+            )
 
     # --- Build and return the response ----------------------------------------
     # Map the service result dict to our Pydantic response model.
@@ -317,4 +535,5 @@ async def chat(request: ChatRequest):
         session_id=request.session_id,  # echo back for client convenience
         model=result["model"], #Tells cleitn which claude model handled it
         usage=result["usage"], #Returns token counts
+        user_id=resolved_user_id,
     )
