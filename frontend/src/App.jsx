@@ -8,25 +8,27 @@
 // Mode 2: Short-Term     — inverted: light background, red accents
 // Mode 3: Long-Term      — modern Redis: chartreuse yellow (#DCFF1E) + navy
 //
-// Talks to our FastAPI backend at /api/chat via the Vite dev proxy.
+// Talks to our FastAPI backend. In development it defaults to localhost:8000;
+// in production it can still use the /api prefix if a reverse proxy is present.
 // =============================================================================
 
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 // --- Configuration -----------------------------------------------------------
-const API_URL = "/api";
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? "http://localhost:8000" : "/api");
+const LONG_TERM_USER_ID =
+  import.meta.env.VITE_LONG_TERM_USER_ID || "demo-long-term-user";
 
 // --- Mode definitions --------------------------------------------------------
-// Each mode has an id, a display label, a CSS class for theming, and
-// descriptive text shown in the empty state. The session_id changes per mode
-// so conversations don't bleed across modes during the demo.
 const MODES = [
   {
     id: "none",
     label: "No Memory",
-    themeClass: "",                          // default theme (no extra class)
+    themeClass: "",
     heading: "No Memory Mode",
     description:
       "Each message is independent. The assistant has no context of previous messages — every request starts from zero.",
@@ -52,16 +54,31 @@ const MODES = [
   },
 ];
 
-// --- Suggestion chips — placeholder prompts for the demo --------------------
-// These appear in the empty state. Clicking one sends that message directly.
-// Kept as placeholders so you can craft the narrative story for the demo later.
+// --- Suggestion chips --------------------------------------------------------
 const SUGGESTIONS = [
   "Template prompt one",
   "Template prompt two",
   "Template prompt three",
 ];
 
-// --- Utility: format a timestamp for display ---------------------------------
+function createSessionId(prefix) {
+  return `${prefix}-${Date.now()}`;
+}
+
+function createDraftLongTermChat(sessionId = createSessionId("demo-long-term")) {
+  return {
+    id: sessionId,
+    label: "New Chat",
+    sessionId,
+    messages: [],
+    isDraft: true,
+    hasLoadedMessages: true,
+    preview: null,
+    lastUpdated: null,
+    messageCount: 0,
+  };
+}
+
 function formatMessageTime(timestamp) {
   if (!timestamp) return null;
   const date = new Date(timestamp);
@@ -70,58 +87,230 @@ function formatMessageTime(timestamp) {
 }
 
 function App() {
-  // --- State -----------------------------------------------------------------
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-
-  // activeMode is the index into MODES (0 = no memory, 1 = short-term, 2 = long-term)
+  const [loadingLongTermArchive, setLoadingLongTermArchive] = useState(false);
+  const [longTermChats, setLongTermChats] = useState(() => [
+    createDraftLongTermChat("demo-long-term"),
+  ]);
+  const [activeLongTermChatId, setActiveLongTermChatId] = useState("demo-long-term");
   const [activeMode, setActiveMode] = useState(0);
 
-  // Derived: the current mode object
   const mode = MODES[activeMode];
+  const activeLongTermChat =
+    longTermChats.find((chat) => chat.id === activeLongTermChatId) || longTermChats[0];
+  const displayedMessages =
+    mode.id === "long-term" ? (activeLongTermChat?.messages || []) : messages;
+  const currentSessionId =
+    mode.id === "long-term" ? activeLongTermChat?.sessionId : mode.session;
 
-  // --- Refs ------------------------------------------------------------------
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const loadLongTermChatsRef = useRef(async () => {});
 
-  // --- Auto-scroll to bottom when messages change ----------------------------
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+  }, [messages, longTermChats, loading, loadingLongTermArchive]);
 
-  // --- Apply the theme class to the document body ----------------------------
-  // We put the theme class on <body> so that CSS variables cascade to everything,
-  // including elements outside the React tree (scrollbars, browser chrome hints).
   useEffect(() => {
-    // Remove all theme classes first, then add the active one
     document.body.classList.remove("theme-short-term", "theme-long-term");
     if (mode.themeClass) {
       document.body.classList.add(mode.themeClass);
     }
   }, [mode.themeClass]);
 
-  // --- Switch mode -----------------------------------------------------------
-  // Clears the conversation when switching modes so each demo starts fresh.
   const switchMode = (index) => {
-    if (index === activeMode) return; // already active
+    if (index === activeMode) return;
     setActiveMode(index);
-    setMessages([]);
     setInput("");
+
+    if (MODES[index].id !== "long-term") {
+      setMessages([]);
+    }
   };
 
-  // --- Send a message to the backend -----------------------------------------
+  const upsertLongTermChat = (sessionId, updater) => {
+    setLongTermChats((prev) => {
+      const existing = prev.find((chat) => chat.sessionId === sessionId);
+      const updated = updater(existing || createDraftLongTermChat(sessionId));
+
+      if (existing) {
+        return prev.map((chat) =>
+          chat.sessionId === sessionId ? updated : chat
+        );
+      }
+
+      return [updated, ...prev];
+    });
+  };
+
+  const loadLongTermChat = async (sessionId) => {
+    if (!sessionId) return;
+
+    setLoadingLongTermArchive(true);
+    try {
+      const response = await fetch(
+        `${API_URL}/long-term/chats/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(LONG_TERM_USER_ID)}`
+      );
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      upsertLongTermChat(sessionId, (existing) => ({
+        ...existing,
+        id: data.session_id,
+        sessionId: data.session_id,
+        label: data.label,
+        messages: data.messages,
+        isDraft: false,
+        hasLoadedMessages: true,
+      }));
+      setActiveLongTermChatId(data.session_id);
+    } catch (error) {
+      upsertLongTermChat(sessionId, (existing) => ({
+        ...existing,
+        messages: [
+          {
+            role: "assistant",
+            content: `Error loading archived chat: ${error.message}`,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+        hasLoadedMessages: true,
+      }));
+    } finally {
+      setLoadingLongTermArchive(false);
+      inputRef.current?.focus();
+    }
+  };
+
+  const loadLongTermChats = async (preferredSessionId = null) => {
+    setLoadingLongTermArchive(true);
+    try {
+      const response = await fetch(
+        `${API_URL}/long-term/chats?user_id=${encodeURIComponent(LONG_TERM_USER_ID)}`
+      );
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const archiveChats = data.chats || [];
+      const drafts = longTermChats.filter(
+        (chat) =>
+          chat.isDraft &&
+          !archiveChats.some((archiveChat) => archiveChat.session_id === chat.sessionId)
+      );
+      const previousBySessionId = new Map(
+        longTermChats.map((chat) => [chat.sessionId, chat])
+      );
+
+      const mergedChats = archiveChats.map((chat) => {
+        const existing = previousBySessionId.get(chat.session_id);
+        return {
+          id: chat.session_id,
+          sessionId: chat.session_id,
+          label: chat.label,
+          messages: existing?.messages || [],
+          isDraft: false,
+          hasLoadedMessages: existing?.hasLoadedMessages || false,
+          preview: chat.preview,
+          lastUpdated: chat.last_updated,
+          messageCount: chat.message_count,
+        };
+      });
+
+      const nextChats =
+        drafts.length || mergedChats.length
+          ? [...drafts, ...mergedChats]
+          : [createDraftLongTermChat()];
+
+      setLongTermChats(nextChats);
+
+      const nextActiveId =
+        preferredSessionId ||
+        (nextChats.some((chat) => chat.id === activeLongTermChatId)
+          ? activeLongTermChatId
+          : nextChats[0].id);
+
+      setActiveLongTermChatId(nextActiveId);
+
+      const selectedChat = nextChats.find((chat) => chat.id === nextActiveId);
+      if (selectedChat && !selectedChat.isDraft && !selectedChat.hasLoadedMessages) {
+        await loadLongTermChat(selectedChat.sessionId);
+      }
+    } catch {
+      setLongTermChats((prev) =>
+        prev.length > 0 ? prev : [createDraftLongTermChat()]
+      );
+    } finally {
+      setLoadingLongTermArchive(false);
+    }
+  };
+
+  loadLongTermChatsRef.current = loadLongTermChats;
+
+  const startNewLongTermChat = () => {
+    const draftChat = createDraftLongTermChat();
+    setLongTermChats((prev) => [draftChat, ...prev]);
+    setActiveLongTermChatId(draftChat.id);
+    setInput("");
+    inputRef.current?.focus();
+  };
+
+  const selectLongTermChat = async (event) => {
+    const nextChatId = event.target.value;
+    setActiveLongTermChatId(nextChatId);
+    setInput("");
+
+    const selectedChat = longTermChats.find((chat) => chat.id === nextChatId);
+    if (selectedChat && !selectedChat.isDraft && !selectedChat.hasLoadedMessages) {
+      await loadLongTermChat(selectedChat.sessionId);
+    }
+
+    inputRef.current?.focus();
+  };
+
+  const appendMessage = (message, options = {}) => {
+    const {
+      targetModeId = mode.id,
+      targetLongTermSessionId = currentSessionId,
+    } = options;
+
+    if (targetModeId === "long-term") {
+      upsertLongTermChat(targetLongTermSessionId, (existing) => ({
+        ...existing,
+        id: targetLongTermSessionId,
+        sessionId: targetLongTermSessionId,
+        messages: [...(existing.messages || []), message],
+        hasLoadedMessages: true,
+      }));
+      return;
+    }
+
+    setMessages((prev) => [...prev, message]);
+  };
+
   const sendMessage = async (overrideText) => {
     const trimmed = (overrideText || input).trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || !currentSessionId) return;
 
-    // Optimistic UI: show the user message immediately
+    const requestModeId = mode.id;
+    const requestSessionId = currentSessionId;
+
     const userMessage = {
       role: "user",
       content: trimmed,
       timestamp: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, userMessage]);
+    appendMessage(userMessage, {
+      targetModeId: requestModeId,
+      targetLongTermSessionId: requestSessionId,
+    });
     setInput("");
     setLoading(true);
 
@@ -131,7 +320,9 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: trimmed,
-          session_id: mode.session,
+          session_id: requestSessionId,
+          memory_mode: requestModeId,
+          user_id: requestModeId === "long-term" ? LONG_TERM_USER_ID : undefined,
         }),
       });
 
@@ -146,21 +337,31 @@ function App() {
         timestamp: new Date().toISOString(),
         usage: data.usage,
       };
-      setMessages((prev) => [...prev, assistantMessage]);
+      appendMessage(assistantMessage, {
+        targetModeId: requestModeId,
+        targetLongTermSessionId: requestSessionId,
+      });
+
+      if (requestModeId === "long-term") {
+        await loadLongTermChats(requestSessionId);
+        await loadLongTermChat(requestSessionId);
+      }
     } catch (error) {
       const errorMessage = {
         role: "assistant",
         content: `Error: ${error.message}. Is the backend running on port 8000?`,
         timestamp: new Date().toISOString(),
       };
-      setMessages((prev) => [...prev, errorMessage]);
+      appendMessage(errorMessage, {
+        targetModeId: requestModeId,
+        targetLongTermSessionId: requestSessionId,
+      });
     } finally {
       setLoading(false);
       inputRef.current?.focus();
     }
   };
 
-  // --- Handle Enter key to send ----------------------------------------------
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -168,10 +369,15 @@ function App() {
     }
   };
 
-  // --- Render ----------------------------------------------------------------
+  useEffect(() => {
+    if (mode.id !== "long-term") return;
+    void loadLongTermChatsRef.current();
+  }, [mode.id]);
+
+  const savedLongTermChatCount = longTermChats.filter((chat) => !chat.isDraft).length;
+
   return (
     <div className="app">
-      {/* --- Header --------------------------------------------------------- */}
       <header className="header">
         <div className="header-dot" />
         <h1>
@@ -180,7 +386,6 @@ function App() {
         <span className="header-subtitle">AI Content Strategist</span>
       </header>
 
-      {/* --- Mode switcher -------------------------------------------------- */}
       <div className="mode-bar">
         <div className="mode-switcher">
           {MODES.map((m, i) => (
@@ -195,10 +400,49 @@ function App() {
         </div>
       </div>
 
-      {/* --- Messages area -------------------------------------------------- */}
       <div className="messages">
-        {/* Empty state: mode description + suggestion chips */}
-        {messages.length === 0 && !loading && (
+        {mode.id === "long-term" && (
+          <div className="conversation-toolbar">
+            <div className="conversation-details">
+              <span className="conversation-label">Chat Archive</span>
+              <div className="conversation-picker-wrap">
+                <label className="sr-only" htmlFor="long-term-chat-picker">
+                  Select a previous long-term chat
+                </label>
+                <select
+                  id="long-term-chat-picker"
+                  className="conversation-picker"
+                  value={activeLongTermChatId || ""}
+                  onChange={selectLongTermChat}
+                  disabled={loading || loadingLongTermArchive}
+                >
+                  {longTermChats.map((chat) => (
+                    <option key={chat.id} value={chat.id}>
+                      {chat.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="conversation-value">
+                  {loadingLongTermArchive
+                    ? "Syncing archive..."
+                    : `${savedLongTermChatCount} saved conversation${
+                        savedLongTermChatCount === 1 ? "" : "s"
+                      }`}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="new-chat-btn"
+              onClick={startNewLongTermChat}
+              disabled={loading || loadingLongTermArchive}
+            >
+              New Chat
+            </button>
+          </div>
+        )}
+
+        {displayedMessages.length === 0 && !loading && !loadingLongTermArchive && (
           <div className="empty-state">
             <h2>{mode.heading}</h2>
             <p>{mode.description}</p>
@@ -216,8 +460,7 @@ function App() {
           </div>
         )}
 
-        {/* Render each message as a bubble */}
-        {messages.map((msg, i) => {
+        {displayedMessages.map((msg, i) => {
           const timeLabel = formatMessageTime(msg.timestamp);
           return (
             <div key={i} className={`message-row ${msg.role}`}>
@@ -262,8 +505,7 @@ function App() {
           );
         })}
 
-        {/* Loading indicator */}
-        {loading && (
+        {(loading || loadingLongTermArchive) && (
           <div className="loading">
             <div className="loading-dot" />
             <div className="loading-dot" />
@@ -274,7 +516,6 @@ function App() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* --- Input area ----------------------------------------------------- */}
       <div className="input-area">
         <input
           ref={inputRef}
@@ -283,7 +524,6 @@ function App() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Ask about content ideas, editorial planning, audience strategy..."
-          disabled={loading}
           autoFocus
         />
         <button onClick={() => sendMessage()} disabled={loading || !input.trim()}>

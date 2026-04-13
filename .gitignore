@@ -6,6 +6,7 @@
 # The .env file contains API keys. Only .env.example (with placeholder values)
 # should be committed.
 .env
+AGENTS.md
 
 # --- Presentation docs -------------------------------------------------------
 # Personal notes, decisions log, and slide drafts. These are working materials
