@@ -43,6 +43,16 @@ EVENT_DATE_PATTERN = (
     rf"(?:\d{{4}}-\d{{2}}-\d{{2}}|{MONTH_NAME_PATTERN}\s+\d{{1,2}},\s+\d{{4}}|"
     r"today|yesterday|tomorrow|last week|next week)"
 )
+LONG_TERM_FACT_FALLBACK_QUERIES = (
+    "user name",
+    "user preferences",
+    "audience preferences",
+    "conference",
+    "product launch",
+    "shipped feature",
+    "team roadmap",
+    "important facts about the user",
+)
 
 
 class MemoryService:
@@ -92,6 +102,15 @@ class MemoryService:
         self._client = MemoryAPIClient(self._config)
 
         self._max_retries = 3
+
+    def build_default_long_term_memory_strategy(self) -> MemoryStrategyConfig:
+        """
+        Return the default AMS extraction strategy for long-term mode.
+
+        The built-in `discrete` strategy lets `put_working_memory()` trigger
+        background extraction of user facts without requiring app-side parsing.
+        """
+        return MemoryStrategyConfig(strategy="discrete")
 
     async def load_working_memory(
         self,
@@ -336,16 +355,14 @@ class MemoryService:
         This method queries AMS native long-term memory rather than reusing
         working memory as a durable fact store.
         """
-        results = await self._with_retry(
-            self._client.search_long_term_memory,
+        results = await self._search_long_term_memory_records(
             text=query,
-            user_id=UserId(eq=user_id),
+            user_id=user_id,
             limit=limit,
-            optimize_query=False,
         )
         return [
             memory.text
-            for memory in results.memories
+            for memory in results
             if hasattr(memory, "text")
         ]
 
@@ -384,7 +401,7 @@ class MemoryService:
         system_sections: list[str] = []
         anthropic_messages: list[dict] = []
 
-        for message in prompt_result.get("messages", []):
+        for message in prompt_result.get("messages") or []:
             role = message.get("role")
             text = self._coerce_message_content_text(message.get("content"))
             if not text:
@@ -408,7 +425,7 @@ class MemoryService:
             "messages": anthropic_messages,
             "long_term_memories": [
                 self._memory_record_to_fact_dict(memory)
-                for memory in prompt_result.get("long_term_memories", [])
+                for memory in (prompt_result.get("long_term_memories") or [])
                 if isinstance(memory, dict) or hasattr(memory, "text")
             ],
         }
@@ -426,18 +443,34 @@ class MemoryService:
         AMS search is query-based, so this method uses a broad search phrase to
         surface a representative set of durable memories for the user.
         """
-        results = await self._with_retry(
-            self._client.search_long_term_memory,
-            text="user identity preferences events conferences launches audience",
-            user_id=UserId(eq=user_id),
-            limit=limit,
-            optimize_query=False,
-        )
-        return [
+        try:
+            results = await self._search_long_term_memory_records(
+                text="user identity preferences events conferences launches audience",
+                user_id=user_id,
+                limit=limit,
+            )
+        except Exception as error:
+            print(
+                "[WARN] Broad long-term fact search failed; "
+                f"falling back to seeded semantic scan: {error}"
+            )
+            return await self._scan_long_term_facts_by_seed_queries(
+                user_id=user_id,
+                limit=limit,
+            )
+
+        facts = [
             self._memory_record_to_fact_dict(memory)
-            for memory in results.memories
+            for memory in results
             if hasattr(memory, "text")
         ]
+        if facts:
+            return facts
+
+        return await self._scan_long_term_facts_by_seed_queries(
+            user_id=user_id,
+            limit=limit,
+        )
 
     async def store_long_term_facts(
         self,
@@ -856,6 +889,140 @@ class MemoryService:
             )
         return ""
 
+    def _append_long_term_fact_context(
+        self,
+        base_system_prompt: str,
+        long_term_memories: list[dict],
+    ) -> str:
+        """
+        Append retrieved long-term facts to the base system prompt.
+
+        This is used when we cannot rely on AMS memory_prompt() to inject
+        semantic context automatically.
+        """
+        fact_lines = [
+            f"- {memory['text']}"
+            for memory in long_term_memories
+            if memory.get("text")
+        ]
+        if not fact_lines:
+            return base_system_prompt
+
+        return (
+            f"{base_system_prompt}\n\n"
+            "Remembered long-term facts from earlier chats:\n"
+            f"{chr(10).join(fact_lines)}"
+        )
+
+    async def _search_long_term_memory_records(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        limit: int,
+        search_mode: str | None = None,
+        allow_keyword_fallback: bool = True,
+    ) -> list:
+        """
+        Search AMS long-term memories with an optional keyword fallback.
+
+        Semantic search is preferred only when the backend is explicitly
+        configured to rely on AMS vector retrieval.
+        """
+        if search_mode is not None:
+            search_modes = [search_mode]
+        elif self._settings.prefer_ams_long_term_search:
+            search_modes = ["semantic"]
+            if allow_keyword_fallback:
+                search_modes.append("keyword")
+        else:
+            search_modes = ["keyword"]
+
+        last_error: Exception | None = None
+        for mode in search_modes:
+            try:
+                search_kwargs = dict(
+                    text=text,
+                    user_id=UserId(eq=user_id),
+                    limit=limit,
+                    optimize_query=False,
+                )
+                if mode != "semantic":
+                    search_kwargs["search_mode"] = mode
+
+                results = await self._with_retry(
+                    self._client.search_long_term_memory,
+                    **search_kwargs,
+                )
+                return list(results.memories)
+            except Exception as error:
+                last_error = error
+                if mode == "semantic" and allow_keyword_fallback:
+                    print(
+                        "[WARN] Semantic long-term search failed; "
+                        f"retrying with keyword search: {error}"
+                    )
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+
+        return []
+
+    async def _scan_long_term_facts_by_seed_queries(
+        self,
+        *,
+        user_id: str,
+        limit: int,
+        extra_queries: list[str] | None = None,
+    ) -> list[dict]:
+        """
+        Collect remembered facts using several semantic seed queries.
+
+        AMS retrieval quality depends heavily on the query phrasing. When one
+        broad query returns no matches, we sweep a few high-signal prompts and
+        merge the results into one stable fact list.
+        """
+        fact_map: dict[tuple[str, str | None, str | None], dict] = {}
+        queries: list[str] = []
+        for query in extra_queries or []:
+            if query and query not in queries:
+                queries.append(query)
+        for query in LONG_TERM_FACT_FALLBACK_QUERIES:
+            if query not in queries:
+                queries.append(query)
+
+        for query in queries:
+            try:
+                memories = await self._search_long_term_memory_records(
+                    text=query,
+                    user_id=user_id,
+                    limit=limit,
+                    allow_keyword_fallback=False,
+                )
+            except Exception as error:
+                print(
+                    "[WARN] Seeded long-term fact scan failed "
+                    f"for '{query}': {error}"
+                )
+                continue
+
+            for memory in memories:
+                if not hasattr(memory, "text"):
+                    continue
+                fact = self._memory_record_to_fact_dict(memory)
+                signature = (
+                    fact.get("text"),
+                    fact.get("memory_type"),
+                    fact.get("event_date"),
+                )
+                fact_map[signature] = fact
+                if len(fact_map) >= limit:
+                    return list(fact_map.values())
+
+        return list(fact_map.values())
+
     async def _wait_for_long_term_indexing(
         self,
         user_id: str,
@@ -875,14 +1042,19 @@ class MemoryService:
         for _ in range(attempts):
             resolved_texts: set[str] = set()
             for text in pending_texts:
-                results = await self._with_retry(
-                    self._client.search_long_term_memory,
-                    text=text,
-                    user_id=UserId(eq=user_id),
-                    limit=5,
-                    optimize_query=False,
-                )
-                if any(getattr(memory, "text", None) == text for memory in results.memories):
+                try:
+                    results = await self._search_long_term_memory_records(
+                        text=text,
+                        user_id=user_id,
+                        limit=5,
+                    )
+                except Exception as error:
+                    print(
+                        "[WARN] Skipping long-term indexing wait because search "
+                        f"is unavailable: {error}"
+                    )
+                    return
+                if any(getattr(memory, "text", None) == text for memory in results):
                     resolved_texts.add(text)
 
             pending_texts -= resolved_texts

@@ -49,13 +49,23 @@ services:
         "0.0.0.0",
         "--port",
         "8000",
-        "--task-backend=asyncio",
       ]
     depends_on:
       redis:
         condition: service_healthy
     ports:
       - "${AMS_PORT:-32769}:8000"
+
+  agent-memory-worker:
+    image: "redislabs/agent-memory-server:${AMS_IMAGE_TAG:-0.15.2}"
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+    command: ["agent-memory", "task-worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
 
   redis:
     image: "redis:${REDIS_IMAGE_TAG:-8.6.2}"

@@ -278,7 +278,8 @@ async def chat(request: ChatRequest):
     - `none`: no memory is loaded or stored
     - `short-term`: load and store transcript working memory
     - `long-term`: hydrate the prompt from working memory + native long-term
-      memory, then store new durable facts after the response
+      memory, then store the turn back into working memory so AMS can extract
+      durable facts in the background
     """
     if _anthropic_service is None:
         raise HTTPException(
@@ -353,26 +354,17 @@ async def chat(request: ChatRequest):
                 user_message=request.message,
                 assistant_message=result["response"],
                 user_id=resolved_user_id,
+                long_term_memory_strategy=(
+                    _memory_service.build_default_long_term_memory_strategy()
+                    if request.memory_mode == "long-term"
+                    else None
+                ),
             )
         except Exception as error:
             print(f"[ERROR] Memory store error: {error}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to store chat history in memory service: {error}",
-            )
-
-    if request.memory_mode == "long-term":
-        try:
-            await _memory_service.store_long_term_facts(
-                session_id=request.session_id,
-                user_id=resolved_user_id,
-                user_message=request.message,
-            )
-        except Exception as error:
-            print(f"[ERROR] Long-term memory store error: {error}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to store long-term memory: {error}",
             )
 
     return ChatResponse(
