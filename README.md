@@ -1,88 +1,129 @@
 # Redis DevRel Memory Demo
 
+[![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/frontend-React-61DAFB?logo=react&logoColor=000)](https://react.dev/)
+[![Redis](https://img.shields.io/badge/memory-Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Docker Compose](https://img.shields.io/badge/runtime-Docker_Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![Last Commit](https://img.shields.io/github/last-commit/MatthewFeroz/redis-devrel)](https://github.com/MatthewFeroz/redis-devrel/commits/main)
+[![Top Language](https://img.shields.io/github/languages/top/MatthewFeroz/redis-devrel)](https://github.com/MatthewFeroz/redis-devrel)
+
 Short full-stack demo for showing how Redis-backed memory changes an LLM chat experience over time.
 
 ## What Runs
 
-This repo now packages cleanly into four runtime pieces:
-- `frontend`: static React build served by Nginx
-- `backend`: FastAPI app that calls Claude and Agent Memory Server
+This repo runs as four services:
+- `frontend`: static React app served by Nginx
+- `backend`: FastAPI app that owns the HTTP API and Anthropic calls
 - `agent-memory-server`: Redis Agent Memory Server (AMS)
-- `redis`: official Redis Open Source image for working memory, archival data, and search/vector features in Redis 8
+- `redis`: Redis Open Source with search and JSON modules
 
-Request flow stays easy to explain during a walkthrough:
+## Prerequisites
 
-1. The browser calls the frontend container.
-2. Nginx proxies `/api/*` requests to the FastAPI backend.
-3. The backend sends chat requests to Anthropic and memory requests to AMS.
-4. AMS persists and searches memory in Redis.
+Install these before you start:
+- Docker Desktop
+- An Anthropic API key
+- A Hugging Face token for the default AMS embedding model
 
-That separation matters for the demo because the backend still teaches the right architecture:
-- `AnthropicService` owns model calls.
-- `MemoryService` owns AMS calls.
-- Redis remains visible as the persistence layer, not hidden inside the app.
+Verify Docker is running before you continue.
 
-## Docker Deployment
-
-The simplest way to share this project with other people is a single `docker compose` stack.
+## Quick Start
 
 1. Copy `.env.example` to `.env`.
-2. Fill in the real API keys you want to use.
-3. Run:
+2. Open `.env` and replace the placeholder secrets.
+3. From the repo root, run:
 
 ```bash
 docker compose up --build
 ```
 
+If you want the stack to keep running in the background, use:
+
+```bash
+docker compose up --build -d
+```
+
 Compose keeps host-facing and container-facing addresses separate on purpose:
 - your browser uses `localhost:*`
 - containers talk to each other by service name such as `backend`, `agent-memory-server`, and `redis`
-- the Compose file overrides internal URLs so you do not have to rewrite the app config by hand
+- the Compose file overrides internal URLs so you do not have to rewrite app config by hand
 
-After startup:
+## First-Run Checks
+
+After startup, verify these URLs:
 - Frontend: `http://localhost:3000`
 - Backend docs: `http://localhost:8000/docs`
 - Backend health: `http://localhost:8000/health`
-- Agent Memory Server: `http://localhost:32769`
+- Agent Memory Server health: `http://localhost:32769/v1/health`
 
-## Why One Compose File
+You can also inspect the running services with:
 
-This project is a good fit for one Compose file because each service has a single, teachable responsibility:
-- `frontend` packages the UI and reverse proxy.
-- `backend` packages the application logic and API contract.
-- `agent-memory-server` packages the Redis-native memory layer.
-- `redis` packages persistence and search.
+```bash
+docker compose ps
+```
 
-For this demo, AMS runs in `asyncio` task mode inside one container. That is the right default for other people running the project locally because it removes the need for a separate background worker. If you later want a more production-like AMS deployment, switch AMS to its default Docket backend and run a dedicated `task-worker` container.
+Expected services:
+- `frontend`
+- `backend`
+- `agent-memory-server`
+- `redis`
 
-## Version Strategy
+## Required Environment Variables
 
-Do not default to floating `latest` tags in your shared Compose file. That gives you newer images, but it also makes the demo less reproducible.
+Set these in `.env` before startup:
+- `ANTHROPIC_API_KEY`
+- `HF_TOKEN`
 
-Use this policy instead:
-- Pin known-good Redis image tags in `.env.example`.
-- Pin known-good AMS image tags in `.env.example`.
-- Pin Python packages in `requirements.txt`.
-- Upgrade intentionally, then rebuild and smoke-test the stack.
+The rest of the defaults in `.env.example` are already wired for local Docker Compose.
 
-As of April 13, 2026, the current upstream versions I verified were:
-- `redislabs/agent-memory-server:0.15.2`
-- `redis:8.6.2`
-- `agent-memory-client==0.14.0`
-- `fastapi==0.135.3`
-- `uvicorn==0.44.0`
-- `anthropic==0.94.1`
+## Stopping The Stack
 
-## Three Memory Modes
+To stop the running services:
 
-### No Memory
+```bash
+docker compose down
+```
 
-The assistant is stateless. Every message is treated as a brand-new request.
+To stop services and also remove the Redis data volume:
 
-### Short-Term Memory
+```bash
+docker compose down -v
+```
 
-The assistant remembers the current conversation thread. This is session memory tied to a `session_id`.
+Use `-v` only if you want to wipe stored memory and start fresh.
 
-### Long-Term Memory
+## Troubleshooting
 
-The assistant remembers facts across chats. This uses a stable `user_id`, archived conversations, and a remembered-facts layer backed by Redis through Agent Memory Server.
+### Port Already Allocated
+
+If Compose fails with a message like `Bind for 0.0.0.0:6379 failed: port is already allocated`, another local process or container is already using that host port.
+
+Common fixes:
+- stop the conflicting container or process
+- change the host port in `.env`
+
+Example alternate ports:
+
+```env
+FRONTEND_PORT=3001
+BACKEND_PORT=8001
+AMS_PORT=32770
+REDIS_PORT=6380
+```
+
+Then rerun:
+
+```bash
+docker compose up --build
+```
+
+### Frontend Loads But Chat Fails
+
+Check:
+- `http://localhost:8000/health`
+- `http://localhost:32769/v1/health`
+- `docker compose logs --tail 100`
+
+If the backend is up but chat requests fail, the usual causes are:
+- missing or invalid `ANTHROPIC_API_KEY`
+- missing or invalid Hugging Face token for AMS embeddings
+- one of the services exited during startup

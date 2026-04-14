@@ -33,6 +33,11 @@ const MODES = [
     description:
       "Each message is independent. The assistant has no context of previous messages — every request starts from zero.",
     session: "demo-no-memory",
+    suggestions: [
+      "Help me brainstorm a LinkedIn post about Redis for AI apps.",
+      "Write me 5 hooks for a Redis developer tutorial.",
+      "Give me 3 blog ideas for backend engineers learning Redis.",
+    ],
   },
   {
     id: "short-term",
@@ -42,6 +47,11 @@ const MODES = [
     description:
       "The assistant remembers everything from this session. Conversation history is loaded from Redis on every request.",
     session: "demo-short-term",
+    suggestions: [
+      "Help me outline a Redis webinar for software engineers.",
+      "Write me 5 hooks for a post about Redis caching strategies.",
+      "Turn these ideas into a short content plan for next month.",
+    ],
   },
   {
     id: "long-term",
@@ -51,14 +61,12 @@ const MODES = [
     description:
       "The assistant remembers you across sessions. Facts and preferences persist in Redis even after you start a new conversation.",
     session: "demo-long-term",
+    suggestions: [
+      "Remember that our audience prefers hands-on Redis tutorials.",
+      "Brainstorm a LinkedIn post for Redis developers using that audience context.",
+      "Write me 5 hooks related to Redis, software performance, and AI.",
+    ],
   },
-];
-
-// --- Suggestion chips --------------------------------------------------------
-const SUGGESTIONS = [
-  "Template prompt one",
-  "Template prompt two",
-  "Template prompt three",
 ];
 
 function createSessionId(prefix) {
@@ -84,6 +92,17 @@ function formatMessageTime(timestamp) {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return null;
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function formatFactDate(timestamp) {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function App() {
@@ -431,111 +450,14 @@ function App() {
         </div>
       </div>
 
+      <div className={`chat-body${mode.id === "long-term" ? " has-sidebar" : ""}`}>
       <div className="messages">
-        {mode.id === "long-term" && (
-          <div className="long-term-layout">
-            <div className="conversation-toolbar">
-              <div className="conversation-details">
-                <span className="conversation-label">Chat Archive</span>
-                <div className="conversation-picker-wrap">
-                  <label className="sr-only" htmlFor="long-term-chat-picker">
-                    Select a previous long-term chat
-                  </label>
-                  <select
-                    id="long-term-chat-picker"
-                    className="conversation-picker"
-                    value={activeLongTermChatId || ""}
-                    onChange={selectLongTermChat}
-                    disabled={loading || loadingLongTermArchive}
-                  >
-                    {longTermChats.map((chat) => (
-                      <option key={chat.id} value={chat.id}>
-                        {chat.label}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="conversation-value">
-                    {loadingLongTermArchive
-                      ? "Syncing archive..."
-                      : `${savedLongTermChatCount} saved conversation${
-                          savedLongTermChatCount === 1 ? "" : "s"
-                        }`}
-                  </span>
-                </div>
-              </div>
-              <button
-                type="button"
-                className="new-chat-btn"
-                onClick={startNewLongTermChat}
-                disabled={loading || loadingLongTermArchive}
-              >
-                New Chat
-              </button>
-            </div>
-
-            <section className="memory-panel">
-              <div className="memory-panel-header">
-                <div>
-                  <span className="conversation-label">Remembered Facts</span>
-                  <h2>Persistent profile for {LONG_TERM_USER_ID}</h2>
-                </div>
-                <span className="memory-panel-status">
-                  {loadingRememberedFacts
-                    ? "Refreshing memory..."
-                    : `${rememberedFacts.length} stored fact${
-                        rememberedFacts.length === 1 ? "" : "s"
-                      }`}
-                </span>
-              </div>
-              <p className="memory-panel-copy">
-                This panel reads the long-term memory layer directly from the
-                backend. Starting a new chat changes the active session, but
-                these facts stay attached to the same user profile.
-              </p>
-
-              {rememberedFactsError && (
-                <div className="memory-panel-empty">
-                  Unable to load remembered facts: {rememberedFactsError}
-                </div>
-              )}
-
-              {!rememberedFactsError && rememberedFacts.length === 0 && !loadingRememberedFacts && (
-                <div className="memory-panel-empty">
-                  No long-term facts stored yet. Try saying things like
-                  “My name is Matthew” or “Our audience prefers hands-on tutorials.”
-                </div>
-              )}
-
-              {rememberedFacts.length > 0 && (
-                <div className="memory-fact-list">
-                  {rememberedFacts.map((fact, index) => (
-                    <article
-                      key={`${fact.text}-${fact.source_session_id || index}`}
-                      className="memory-fact-card"
-                    >
-                      <p className="memory-fact-text">{fact.text}</p>
-                      <div className="memory-fact-meta">
-                        {fact.topics?.length > 0 && (
-                          <span>Topics: {fact.topics.join(", ")}</span>
-                        )}
-                        {fact.source_session_id && (
-                          <span>Source chat: {fact.source_session_id}</span>
-                        )}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-          </div>
-        )}
-
         {displayedMessages.length === 0 && !loading && !loadingLongTermArchive && (
           <div className="empty-state">
             <h2>{mode.heading}</h2>
             <p>{mode.description}</p>
             <div className="suggestion-chips">
-              {SUGGESTIONS.map((text) => (
+              {mode.suggestions.map((text) => (
                 <button
                   key={text}
                   className="chip"
@@ -602,6 +524,94 @@ function App() {
         )}
 
         <div ref={messagesEndRef} />
+      </div>
+
+      {mode.id === "long-term" && (
+        <aside className="sidebar">
+          <div className="sidebar-section">
+            <span className="sidebar-label">Chat Archive</span>
+            <label className="sr-only" htmlFor="long-term-chat-picker">
+              Select a previous long-term chat
+            </label>
+            <select
+              id="long-term-chat-picker"
+              className="conversation-picker"
+              value={activeLongTermChatId || ""}
+              onChange={selectLongTermChat}
+              disabled={loading || loadingLongTermArchive}
+            >
+              {longTermChats.map((chat) => (
+                <option key={chat.id} value={chat.id}>
+                  {chat.label}
+                </option>
+              ))}
+            </select>
+            <div className="sidebar-row">
+              <span className="sidebar-muted">
+                {loadingLongTermArchive
+                  ? "Syncing..."
+                  : `${savedLongTermChatCount} saved`}
+              </span>
+              <button
+                type="button"
+                className="new-chat-btn"
+                onClick={startNewLongTermChat}
+                disabled={loading || loadingLongTermArchive}
+              >
+                New Chat
+              </button>
+            </div>
+          </div>
+
+          <div className="sidebar-section">
+            <div className="sidebar-row">
+              <span className="sidebar-label">Remembered Facts</span>
+              <span className="sidebar-muted">
+                {loadingRememberedFacts
+                  ? "loading..."
+                  : `${rememberedFacts.length}`}
+              </span>
+            </div>
+
+            {rememberedFactsError && (
+              <p className="sidebar-muted">Unable to load facts.</p>
+            )}
+
+            {!rememberedFactsError && rememberedFacts.length === 0 && !loadingRememberedFacts && (
+              <p className="sidebar-empty">
+                No facts yet. Try "My name is Matthew" or "I visited RedisConf on April 10, 2026."
+              </p>
+            )}
+
+            {rememberedFacts.length > 0 && (
+              <ul className="fact-list">
+                {rememberedFacts.map((fact, index) => (
+                  <li
+                    key={`${fact.text}-${fact.source_session_id || index}`}
+                    className="fact-item"
+                  >
+                    <p className="fact-text">{fact.text}</p>
+                    {(fact.memory_type || fact.event_date) && (
+                      <div className="fact-meta">
+                        {fact.memory_type && (
+                          <span className={`fact-badge ${fact.memory_type}`}>
+                            {fact.memory_type}
+                          </span>
+                        )}
+                        {fact.event_date && (
+                          <span className="fact-date">
+                            {formatFactDate(fact.event_date)}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </aside>
+      )}
       </div>
 
       <div className="input-area">
