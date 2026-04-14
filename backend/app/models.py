@@ -11,8 +11,7 @@
 # Keeping models in their own file (rather than inline in main.py) means:
 #   - main.py stays focused on routing logic
 #   - models can be imported by tests, services, etc. without circular deps
-#   - when we add Redis memory later, we add new models here without
-#     cluttering the endpoint definitions
+#   - the API contract for transcript and long-term memory stays centralized
 # =============================================================================
 
 from typing import Literal  # constrains a field to an exact set of string values
@@ -48,11 +47,8 @@ class ChatRequest(BaseModel):
     )
 
     # A unique identifier for the conversation session.
-    # WHY THIS MATTERS FOR LATER:
-    # Right now (Task 1), we don't persist anything — each request is
-    # independent. But when we add Redis in Task 2, this session_id
-    # becomes the key under which we store chat history. By including
-    # it now, the API contract won't change when we add memory.
+    # The backend uses this to load and replace the correct working-memory
+    # transcript on every short-term or long-term request.
     #
     # Default is "default" so the API works out-of-the-box without
     # requiring clients to generate session IDs for simple testing.
@@ -60,8 +56,7 @@ class ChatRequest(BaseModel):
         default="default",
         description=(
             "Unique session identifier. Used to group messages into "
-            "conversations. Will be used as the Redis key for chat "
-            "history in a future phase."
+            "conversations and load the correct working-memory transcript."
         ),
         examples=["user-123-session-abc"],
     )
@@ -144,11 +139,8 @@ class ChatResponse(BaseModel):
     )
 
     # Token usage statistics from the Anthropic API.
-    # WHY INCLUDE THIS?
-    #   - Demo value: shows the audience that LLM calls have measurable cost
-    #   - Debugging: helps identify if prompts are unexpectedly large
-    #   - Future: when we add Redis memory/context, we can show how
-    #     injecting history increases input token count
+    # This is useful in the demo because memory hydration changes how much
+    # context is sent to Claude on each request.
     usage: dict = Field(
         ...,
         description=(
@@ -299,6 +291,19 @@ class LongTermFact(BaseModel):
     entities: list[str] = Field(
         default_factory=list,
         description="Key entities or values associated with the fact.",
+    )
+    memory_type: Literal["semantic", "episodic", "message"] | None = Field(
+        default=None,
+        description=(
+            "What kind of memory this is. 'semantic' stores general facts, "
+            "while 'episodic' stores time-grounded events."
+        ),
+    )
+    event_date: str | None = Field(
+        default=None,
+        description=(
+            "ISO timestamp for the event date when this is an episodic memory."
+        ),
     )
     source_session_id: str | None = Field(
         default=None,
