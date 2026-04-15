@@ -606,9 +606,17 @@ class MemoryService:
         if not normalized_message:
             return []
 
-        fact_specs = [
+        # Specific patterns produce richer topics/entities and are tested
+        # first. Each value capture stops at sentence-ending punctuation
+        # AND at conjunctions ("and", "but") so compound sentences like
+        # "my name is Matthew and I prefer short posts" produce two clean
+        # facts instead of one bloated one.
+        specific_specs = [
             (
-                re.compile(r"\bmy name is (?P<value>[^.!?\n]+)", re.IGNORECASE),
+                re.compile(
+                    r"\bmy name is (?P<value>[^.!?,\n]+?)(?:\s+(?:and|but)\b|[.!?,\n]|$)",
+                    re.IGNORECASE,
+                ),
                 lambda value: (
                     f"The user's name is {value.strip()}.",
                     ["identity", "name"],
@@ -616,7 +624,10 @@ class MemoryService:
                 ),
             ),
             (
-                re.compile(r"\bi prefer (?P<value>[^.!?\n]+)", re.IGNORECASE),
+                re.compile(
+                    r"\bi prefer (?P<value>[^.!?,\n]+?)(?:\s+(?:and|but)\b|[.!?,\n]|$)",
+                    re.IGNORECASE,
+                ),
                 lambda value: (
                     f"The user prefers {value.strip()}.",
                     ["preferences"],
@@ -625,7 +636,7 @@ class MemoryService:
             ),
             (
                 re.compile(
-                    r"\bour audience prefers (?P<value>[^.!?\n]+)",
+                    r"\bour audience prefers (?P<value>[^.!?,\n]+?)(?:\s+(?:and|but)\b|[.!?,\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value: (
@@ -663,12 +674,61 @@ class MemoryService:
             ),
         ]
 
+        # -----------------------------------------------------------
+        # Catch-all: "remember ..." in any form
+        # -----------------------------------------------------------
+        # Safety net for facts that don't match any specific pattern.
+        # Only used when NO specific patterns matched — otherwise
+        # it would duplicate what the specific patterns already captured.
+        #
+        # Matches all common phrasings:
+        #   "Remember that X"    "Remember this: X"
+        #   "Remember, X"        "Remember X"
+        #   "Remember this X"    "Remember this, X"
+        #
+        # The optional group eats "that ", "this", commas, colons, and
+        # whitespace between "remember" and the actual content, so the
+        # captured value is always the clean fact text.
+        catchall_spec = (
+            re.compile(
+                r"\bremember(?:\s+(?:that|this))?\s*[,:;]?\s*(?P<value>[^.!?\n]+)",
+                re.IGNORECASE,
+            ),
+            lambda value: (
+                f"{value.strip()[0].upper()}{value.strip()[1:]}.",
+                ["user-stated"],
+                [],
+            ),
+        )
+
         memories: list[ClientMemoryRecord] = []
         seen_signatures: set[tuple[str, str | None, str | None]] = set()
 
-        for pattern, builder in fact_specs:
+        # Run specific patterns first.
+        for pattern, builder in specific_specs:
             for match in pattern.finditer(normalized_message):
                 text, topics, entities = builder(match.group("value"))
+                memory = ClientMemoryRecord(
+                    text=text,
+                    session_id=session_id,
+                    user_id=user_id,
+                    topics=topics,
+                    entities=entities,
+                    memory_type=MemoryTypeEnum.SEMANTIC,
+                )
+                signature = self._memory_signature(memory)
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                memories.append(memory)
+
+        # Only run the catch-all if no specific patterns matched.
+        # When specific patterns fire, the catch-all would just produce
+        # a less-structured duplicate of what they already captured.
+        if not memories:
+            catchall_pattern, catchall_builder = catchall_spec
+            for match in catchall_pattern.finditer(normalized_message):
+                text, topics, entities = catchall_builder(match.group("value"))
                 memory = ClientMemoryRecord(
                     text=text,
                     session_id=session_id,

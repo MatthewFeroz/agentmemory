@@ -182,15 +182,33 @@ function App() {
       }
 
       const data = await response.json();
-      upsertLongTermChat(sessionId, (existing) => ({
-        ...existing,
-        id: data.session_id,
-        sessionId: data.session_id,
-        label: data.label,
-        messages: data.messages,
-        isDraft: false,
-        hasLoadedMessages: true,
-      }));
+      upsertLongTermChat(sessionId, (existing) => {
+        // The archive endpoint returns role/content/timestamp but not
+        // the per-response metadata (memoryContext, usage) that
+        // sendMessage() attaches locally. Merge by index so reloading
+        // the transcript from the archive doesn't discard that metadata.
+        const mergedMessages = (data.messages || []).map((archivedMsg, i) => {
+          const existingMsg = existing.messages?.[i];
+          if (existingMsg && existingMsg.role === archivedMsg.role) {
+            return {
+              ...archivedMsg,
+              memoryContext: existingMsg.memoryContext || null,
+              usage: existingMsg.usage || null,
+            };
+          }
+          return archivedMsg;
+        });
+
+        return {
+          ...existing,
+          id: data.session_id,
+          sessionId: data.session_id,
+          label: data.label,
+          messages: mergedMessages,
+          isDraft: false,
+          hasLoadedMessages: true,
+        };
+      });
       setActiveLongTermChatId(data.session_id);
     } catch (error) {
       upsertLongTermChat(sessionId, (existing) => ({
@@ -223,46 +241,54 @@ function App() {
 
       const data = await response.json();
       const archiveChats = data.chats || [];
-      const drafts = longTermChats.filter(
-        (chat) =>
-          chat.isDraft &&
-          !archiveChats.some((archiveChat) => archiveChat.session_id === chat.sessionId)
-      );
-      const previousBySessionId = new Map(
-        longTermChats.map((chat) => [chat.sessionId, chat])
-      );
 
-      const mergedChats = archiveChats.map((chat) => {
-        const existing = previousBySessionId.get(chat.session_id);
-        return {
-          id: chat.session_id,
-          sessionId: chat.session_id,
-          label: chat.label,
-          messages: existing?.messages || [],
-          isDraft: false,
-          hasLoadedMessages: existing?.hasLoadedMessages || false,
-          preview: chat.preview,
-          lastUpdated: chat.last_updated,
-          messageCount: chat.message_count,
-        };
+      // Use a functional updater so we read the latest pending state.
+      // Without this, sendMessage's appendMessage (which adds memoryContext
+      // and usage to messages) would be overwritten by a stale closure
+      // reading the old longTermChats value.
+      let computedNextChats = [];
+      setLongTermChats((prev) => {
+        const drafts = prev.filter(
+          (chat) =>
+            chat.isDraft &&
+            !archiveChats.some((archiveChat) => archiveChat.session_id === chat.sessionId)
+        );
+        const previousBySessionId = new Map(
+          prev.map((chat) => [chat.sessionId, chat])
+        );
+
+        const mergedChats = archiveChats.map((chat) => {
+          const existing = previousBySessionId.get(chat.session_id);
+          return {
+            id: chat.session_id,
+            sessionId: chat.session_id,
+            label: chat.label,
+            messages: existing?.messages || [],
+            isDraft: false,
+            hasLoadedMessages: existing?.hasLoadedMessages || false,
+            preview: chat.preview,
+            lastUpdated: chat.last_updated,
+            messageCount: chat.message_count,
+          };
+        });
+
+        computedNextChats =
+          drafts.length || mergedChats.length
+            ? [...drafts, ...mergedChats]
+            : [createDraftLongTermChat()];
+
+        return computedNextChats;
       });
-
-      const nextChats =
-        drafts.length || mergedChats.length
-          ? [...drafts, ...mergedChats]
-          : [createDraftLongTermChat()];
-
-      setLongTermChats(nextChats);
 
       const nextActiveId =
         preferredSessionId ||
-        (nextChats.some((chat) => chat.id === activeLongTermChatId)
+        (computedNextChats.some((chat) => chat.id === activeLongTermChatId)
           ? activeLongTermChatId
-          : nextChats[0].id);
+          : computedNextChats[0].id);
 
       setActiveLongTermChatId(nextActiveId);
 
-      const selectedChat = nextChats.find((chat) => chat.id === nextActiveId);
+      const selectedChat = computedNextChats.find((chat) => chat.id === nextActiveId);
       if (selectedChat && !selectedChat.isDraft && !selectedChat.hasLoadedMessages) {
         await loadLongTermChat(selectedChat.sessionId);
       }
@@ -384,6 +410,11 @@ function App() {
         content: data.response,
         timestamp: new Date().toISOString(),
         usage: data.usage,
+        // Attach memory context from the backend so we can render what
+        // memory was used to produce this specific response. Each message
+        // carries its own snapshot because the counts change over time
+        // (e.g. messages_loaded grows with each exchange in a session).
+        memoryContext: data.memory_context || null,
       };
       appendMessage(assistantMessage, {
         targetModeId: requestModeId,
@@ -507,6 +538,18 @@ function App() {
                     <span>
                       {msg.usage.input_tokens} input / {msg.usage.output_tokens}{" "}
                       output tokens
+                    </span>
+                  )}
+                  {/* Memory context: shows what memory was loaded for this
+                      response, inline with timestamp and token usage. Uses the
+                      condensed format so it doesn't overwhelm the message. */}
+                  {msg.role === "assistant" && msg.memoryContext && (
+                    <span className="memory-context">
+                      {msg.memoryContext.memory_mode === "none" && "no memory"}
+                      {msg.memoryContext.memory_mode === "short-term" &&
+                        `${msg.memoryContext.messages_loaded} prior messages loaded`}
+                      {msg.memoryContext.memory_mode === "long-term" &&
+                        `${msg.memoryContext.messages_loaded} prior messages + ${msg.memoryContext.long_term_memories_retrieved} long-term memories loaded`}
                     </span>
                   )}
                 </div>

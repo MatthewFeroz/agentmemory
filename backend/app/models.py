@@ -20,6 +20,55 @@ from pydantic import BaseModel, Field
 
 
 # =============================================================================
+# MemoryContext — Metadata about what memory was used for one response
+# =============================================================================
+class MemoryContext(BaseModel):
+    """
+    Describes the memory state that informed a single chat response.
+
+    The frontend renders this inline with timestamp and token usage so the
+    audience can see at a glance how much context was loaded:
+      - "none"       → "no memory"
+      - "short-term" → "6 prior messages loaded"
+      - "long-term"  → "4 prior messages + 3 long-term memories loaded"
+
+    Each response carries its own snapshot because the counts change over
+    time (e.g. messages_loaded grows with each exchange in a session).
+    """
+
+    # Which memory mode was active for this request.
+    # Echoed back so the frontend doesn't need to track what it sent.
+    memory_mode: Literal["none", "short-term", "long-term"] = Field(
+        ...,
+        description=(
+            "The memory mode that was active when this response was generated."
+        ),
+    )
+
+    # How many prior messages were loaded from the session transcript.
+    # For "none" mode this is always 0 (no history loaded).
+    # For "short-term" this is the count of messages already in working memory.
+    # For "long-term" this is the count of session messages in the hydrated prompt.
+    messages_loaded: int = Field(
+        default=0,
+        description=(
+            "Number of prior conversation messages loaded from the session "
+            "transcript in Redis before sending the request to Claude."
+        ),
+    )
+
+    # How many durable long-term facts were retrieved for this user.
+    # Only populated in "long-term" mode — always 0 otherwise.
+    long_term_memories_retrieved: int = Field(
+        default=0,
+        description=(
+            "Number of long-term memories retrieved from Redis for this "
+            "user identity. Only applies to long-term memory mode."
+        ),
+    )
+
+
+# =============================================================================
 # ChatRequest — What the client sends to POST /chat
 # =============================================================================
 class ChatRequest(BaseModel):
@@ -155,6 +204,17 @@ class ChatResponse(BaseModel):
         default=None,
         description=(
             "Resolved stable user identifier for the request, when applicable."
+        ),
+    )
+
+    # Memory context metadata describing what memory state informed this
+    # response. The frontend renders this inline with timestamp and token
+    # usage so the audience sees memory status as naturally as token counts.
+    memory_context: MemoryContext | None = Field(
+        default=None,
+        description=(
+            "Metadata about the memory state used to generate this response. "
+            "Includes memory mode, messages loaded, and long-term facts retrieved."
         ),
     )
 
