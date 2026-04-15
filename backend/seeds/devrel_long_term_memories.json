@@ -1,0 +1,28 @@
+[
+  {
+    "text": "The Redis DevRel audience prefers hands-on tutorials over generic thought leadership.",
+    "memory_type": "semantic",
+    "topics": ["audience", "content"],
+    "entities": ["Redis DevRel audience"]
+  },
+  {
+    "text": "The team wants memory demos to stay simple, visual, and easy to explain live.",
+    "memory_type": "semantic",
+    "topics": ["presentation", "preferences"],
+    "entities": ["memory demos"]
+  },
+  {
+    "text": "The team plans to present the Redis memory demo at a conference on April 25, 2026.",
+    "memory_type": "episodic",
+    "topics": ["events", "conference"],
+    "entities": ["Redis memory demo"],
+    "event_date": "2026-04-25T00:00:00+00:00"
+  },
+  {
+    "text": "Matthew has a presentation on Friday, April 17, 2026.",
+    "memory_type": "episodic",
+    "topics": ["events", "presentation"],
+    "entities": ["Matthew"],
+    "event_date": "2026-04-17T00:00:00+00:00"
+  }
+]
