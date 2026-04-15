@@ -1,43 +1,28 @@
-# =============================================================================
-# models.py — Pydantic schemas for API request and response bodies
-# =============================================================================
-# WHY THIS FILE EXISTS:
-# FastAPI uses Pydantic models to:
-#   1. Validate incoming JSON — reject malformed requests automatically
-#   2. Serialize outgoing JSON — ensure consistent response shapes
-#   3. Generate OpenAPI docs — the /docs page reads these schemas to show
-#      developers exactly what fields are expected and what they'll get back
-#
-# Keeping models in their own file (rather than inline in main.py) means:
-#   - main.py stays focused on routing logic
-#   - models can be imported by tests, services, etc. without circular deps
-#   - the API contract for transcript and long-term memory stays centralized
-# =============================================================================
+"""Pydantic schemas for API request and response bodies.
 
-from typing import Literal  # constrains a field to an exact set of string values
+FastAPI uses these models to validate incoming JSON, serialize
+outgoing responses, and generate OpenAPI documentation.
+"""
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
-# =============================================================================
-# MemoryContext — Metadata about what memory was used for one response
-# =============================================================================
 class MemoryContext(BaseModel):
+    """Metadata describing the memory state that informed a chat response.
+
+    Each response carries its own snapshot because the counts change
+    over time (e.g. ``messages_loaded`` grows with each exchange).
+
+    Attributes:
+        memory_mode: Which memory mode was active for the request.
+        messages_loaded: Number of prior messages loaded from the
+            session transcript.
+        long_term_memories_retrieved: Number of durable long-term
+            facts retrieved for this user identity.
     """
-    Describes the memory state that informed a single chat response.
 
-    The frontend renders this inline with timestamp and token usage so the
-    audience can see at a glance how much context was loaded:
-      - "none"       → "no memory"
-      - "short-term" → "6 prior messages loaded"
-      - "long-term"  → "4 prior messages + 3 long-term memories loaded"
-
-    Each response carries its own snapshot because the counts change over
-    time (e.g. messages_loaded grows with each exchange in a session).
-    """
-
-    # Which memory mode was active for this request.
-    # Echoed back so the frontend doesn't need to track what it sent.
     memory_mode: Literal["none", "short-term", "long-term"] = Field(
         ...,
         description=(
@@ -45,10 +30,6 @@ class MemoryContext(BaseModel):
         ),
     )
 
-    # How many prior messages were loaded from the session transcript.
-    # For "none" mode this is always 0 (no history loaded).
-    # For "short-term" this is the count of messages already in working memory.
-    # For "long-term" this is the count of session messages in the hydrated prompt.
     messages_loaded: int = Field(
         default=0,
         description=(
@@ -57,8 +38,6 @@ class MemoryContext(BaseModel):
         ),
     )
 
-    # How many durable long-term facts were retrieved for this user.
-    # Only populated in "long-term" mode — always 0 otherwise.
     long_term_memories_retrieved: int = Field(
         default=0,
         description=(
@@ -68,39 +47,27 @@ class MemoryContext(BaseModel):
     )
 
 
-# =============================================================================
-# ChatRequest — What the client sends to POST /chat
-# =============================================================================
 class ChatRequest(BaseModel):
-    """
-    The payload a client sends when they want to chat with Claude.
+    """Payload sent by the client to ``POST /chat``.
 
-    Example JSON body:
-    {
-        "message": "Hi, my name is Matthew!",
-        "session_id": "user-123-session-abc",
-        "memory_mode": "short-term"
-    }
+    Attributes:
+        message: The user's message text.
+        session_id: Unique identifier grouping messages into a
+            conversation and selecting the correct working-memory
+            transcript.
+        memory_mode: Controls how the backend handles memory for
+            this request.
+        user_id: Stable user identity linking multiple long-term
+            conversations together.
     """
 
-    # The user's message text. This is the only truly required field.
-    # `min_length=1` prevents empty strings — there's no point sending
-    # a blank message to Claude (it would waste an API call).
-    # The Field() call also provides description text that shows up in
-    # the auto-generated /docs page.
     message: str = Field(
-        ...,                            # ... means "required, no default"
-        min_length=1,                   # reject empty strings
+        ...,
+        min_length=1,
         description="The user's message to send to Claude.",
-        examples=["Hi, my name is Matthew!"],  # shown in /docs UI
+        examples=["Hi, my name is Matthew!"],
     )
 
-    # A unique identifier for the conversation session.
-    # The backend uses this to load and replace the correct working-memory
-    # transcript on every short-term or long-term request.
-    #
-    # Default is "default" so the API works out-of-the-box without
-    # requiring clients to generate session IDs for simple testing.
     session_id: str = Field(
         default="default",
         description=(
@@ -110,13 +77,6 @@ class ChatRequest(BaseModel):
         examples=["user-123-session-abc"],
     )
 
-    # memory_mode tells the backend which "agent behavior" to use.
-    #
-    # Why Literal instead of plain str?
-    # - Validation: FastAPI rejects unsupported values automatically.
-    # - Documentation: the generated /docs page shows the allowed values.
-    # - Safety: it prevents typos like "shortterm" from silently falling
-    #   through to the wrong behavior.
     memory_mode: Literal["none", "short-term", "long-term"] = Field(
         default="none",
         description=(
@@ -128,13 +88,6 @@ class ChatRequest(BaseModel):
         examples=["short-term"],
     )
 
-    # user_id is the stable identity that ties multiple long-term chats
-    # together. This is different from session_id:
-    # - session_id identifies one conversation thread
-    # - user_id identifies the same person across conversation threads
-    #
-    # That distinction is what allows the demo to prove long-term memory:
-    # new chat, same user, remembered facts.
     user_id: str | None = Field(
         default=None,
         description=(
@@ -142,54 +95,39 @@ class ChatRequest(BaseModel):
             "conversations together. Primarily used when memory_mode is "
             "'long-term'."
         ),
-        examples=["demo-long-term-user"],
+        examples=["default-user"],
     )
 
 
-# =============================================================================
-# ChatResponse — What the server sends back from POST /chat
-# =============================================================================
 class ChatResponse(BaseModel):
-    """
-    The payload returned after Claude processes a message.
+    """Payload returned after Claude processes a message.
 
-    Example JSON response:
-    {
-        "response": "Hi Matthew! Nice to meet you. How can I help?",
-        "session_id": "user-123-session-abc",
-        "model": "claude-haiku-4-5",
-        "usage": {
-            "input_tokens": 42,
-            "output_tokens": 18
-        }
-    }
+    Attributes:
+        response: Claude's text reply.
+        session_id: The session this response belongs to.
+        model: The Claude model that generated the response.
+        usage: Token usage statistics with ``input_tokens`` and
+            ``output_tokens`` counts.
+        user_id: Resolved stable user identity, when applicable.
+        memory_context: Metadata about the memory state used to
+            generate this response.
     """
 
-    # Claude's text response to the user's message.
     response: str = Field(
         ...,
         description="The text response generated by Claude.",
     )
 
-    # Echo back the session_id so the client can confirm which session
-    # this response belongs to. Useful when a client manages multiple
-    # concurrent conversations.
     session_id: str = Field(
         ...,
         description="The session ID this response belongs to.",
     )
 
-    # Which Claude model actually generated the response.
-    # We include this for transparency — during demos, it's helpful to
-    # show exactly which model is being used (e.g., haiku vs. sonnet).
     model: str = Field(
         ...,
         description="The Claude model that generated this response.",
     )
 
-    # Token usage statistics from the Anthropic API.
-    # This is useful in the demo because memory hydration changes how much
-    # context is sent to Claude on each request.
     usage: dict = Field(
         ...,
         description=(
@@ -198,8 +136,6 @@ class ChatResponse(BaseModel):
         ),
     )
 
-    # Echo the resolved user_id when the backend used one. This helps the
-    # frontend confirm which long-term identity was active for the request.
     user_id: str | None = Field(
         default=None,
         description=(
@@ -207,9 +143,6 @@ class ChatResponse(BaseModel):
         ),
     )
 
-    # Memory context metadata describing what memory state informed this
-    # response. The frontend renders this inline with timestamp and token
-    # usage so the audience sees memory status as naturally as token counts.
     memory_context: MemoryContext | None = Field(
         default=None,
         description=(
@@ -219,16 +152,17 @@ class ChatResponse(BaseModel):
     )
 
 
-# =============================================================================
-# ChatMessage â€” A single chat message in API responses
-# =============================================================================
 class ChatMessage(BaseModel):
-    """
-    A normalized chat message returned by archive endpoints.
+    """A single chat message in API responses.
 
-    We use the same simple shape the frontend already understands:
-    role + content. A timestamp is included when it is available from
-    stored memory records.
+    Uses a consistent ``role`` + ``content`` shape, with an optional
+    timestamp when available from stored memory records.
+
+    Attributes:
+        role: Whether the message came from the user or assistant.
+        content: The message text.
+        timestamp: ISO timestamp for when the message was created,
+            if known.
     """
 
     role: Literal["user", "assistant"] = Field(
@@ -245,15 +179,18 @@ class ChatMessage(BaseModel):
     )
 
 
-# =============================================================================
-# LongTermChatSummary â€” Metadata shown in the long-term chat picker
-# =============================================================================
 class LongTermChatSummary(BaseModel):
-    """
-    Lightweight metadata about an archived long-term conversation.
+    """Lightweight metadata about an archived long-term conversation.
 
-    This keeps the list endpoint fast and UI-friendly: the frontend can
-    show the available chats without loading every full transcript up front.
+    Provides enough information for a list view without loading the
+    full transcript.
+
+    Attributes:
+        session_id: Unique identifier for the archived chat session.
+        label: Human-friendly label for the chat.
+        message_count: Total number of stored messages.
+        last_updated: ISO timestamp of the most recent activity.
+        preview: Short preview of the most recent content.
     """
 
     session_id: str = Field(
@@ -278,15 +215,12 @@ class LongTermChatSummary(BaseModel):
     )
 
 
-# =============================================================================
-# LongTermChatsResponse â€” List of archived chats for one user
-# =============================================================================
 class LongTermChatsResponse(BaseModel):
-    """
-    Response for the long-term chat archive listing endpoint.
+    """Response for the long-term chat archive listing endpoint.
 
-    It tells the frontend which stable user identity was used and returns
-    the archived chats that belong to that identity.
+    Attributes:
+        user_id: Stable user identity used for the archive lookup.
+        chats: Archived long-term chat summaries for the user.
     """
 
     user_id: str = Field(
@@ -299,15 +233,14 @@ class LongTermChatsResponse(BaseModel):
     )
 
 
-# =============================================================================
-# LongTermChatResponse â€” Full transcript for one archived chat
-# =============================================================================
 class LongTermChatResponse(BaseModel):
-    """
-    Response for loading one archived long-term conversation.
+    """Full transcript for one archived long-term conversation.
 
-    The frontend uses this when the user selects a previous chat from the
-    archive dropdown and needs the transcript restored.
+    Attributes:
+        user_id: Stable user identity that owns the chat.
+        session_id: The archived chat session that was loaded.
+        label: Human-friendly label for the archived chat.
+        messages: Ordered transcript of the archived chat.
     """
 
     user_id: str = Field(
@@ -328,16 +261,19 @@ class LongTermChatResponse(BaseModel):
     )
 
 
-# =============================================================================
-# LongTermFact - One durable fact remembered across long-term chats
-# =============================================================================
 class LongTermFact(BaseModel):
-    """
-    A normalized long-term fact returned to the frontend.
+    """A durable fact persisted across long-term chat sessions.
 
-    This gives the UI a direct view into the "remembered profile" layer so
-    the demo can prove that Redis-backed memory is persisting more than just
-    one transcript.
+    Attributes:
+        text: Human-readable fact text stored in long-term memory.
+        topics: Topic labels attached to the fact for organization.
+        entities: Key entities or values associated with the fact.
+        memory_type: Classification of the memory — ``semantic`` for
+            general facts, ``episodic`` for time-grounded events.
+        event_date: ISO timestamp for the event date when this is an
+            episodic memory.
+        source_session_id: Chat session where the fact was first
+            observed, if known.
     """
 
     text: str = Field(
@@ -371,16 +307,12 @@ class LongTermFact(BaseModel):
     )
 
 
-# =============================================================================
-# LongTermFactsResponse - Current long-term fact set for one user identity
-# =============================================================================
 class LongTermFactsResponse(BaseModel):
-    """
-    Response for the remembered-facts panel in long-term mode.
+    """Current long-term fact set for one user identity.
 
-    Archive endpoints answer "what happened in a chat?".
-    This endpoint answers "what durable knowledge do we remember about the
-    same user across many chats?".
+    Attributes:
+        user_id: Stable user identity whose facts were loaded.
+        facts: Currently remembered long-term facts for the user.
     """
 
     user_id: str = Field(
@@ -393,29 +325,19 @@ class LongTermFactsResponse(BaseModel):
     )
 
 
-# =============================================================================
-# HealthResponse — What the server sends back from GET /health
-# =============================================================================
 class HealthResponse(BaseModel):
-    """
-    Simple health-check response. Confirms the server is running and
-    reports which model is configured.
+    """Health-check response confirming server status.
 
-    Useful for:
-      - Load balancers / uptime monitors
-      - Quick "is it working?" checks during demos
-      - Verifying the correct model is configured
+    Attributes:
+        status: Server health status (``"ok"`` when healthy).
+        model: The Claude model currently configured.
     """
 
-    # Always "ok" if the server is healthy enough to respond.
     status: str = Field(
         ...,
         description="Server health status.",
         examples=["ok"],
     )
-
-    # Which model the server is configured to use.
-    # Helpful during demos to confirm you're hitting the right model.
     model: str = Field(
         ...,
         description="The Claude model currently configured.",

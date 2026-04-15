@@ -1,17 +1,15 @@
 """Redis-backed short-term and long-term memory service via Agent Memory Server.
 
-This file exists to keep all "memory system" logic in one place.
+Centralizes all memory system logic so that the rest of the application
+does not need to interact with the AMS SDK directly.
 
-Why a separate service?
-1. main.py should stay focused on HTTP request handling.
-2. AnthropicService should stay focused on talking to Claude.
-3. Agent Memory Server has its own SDK, response models, and concepts.
-   Hiding that behind MemoryService makes the rest of the app easier to read.
+This service covers both memory layers:
 
-This service now covers both memory layers used in the demo:
-- Short-term memory: session transcript stored in working memory
-- Long-term memory: reusable facts tied to a stable user_id
-- Archive support: list and reload past long-term chat sessions
+- **Short-term memory**: Session transcript stored in working memory.
+- **Long-term memory**: Durable facts tied to a stable ``user_id``,
+  persisted across sessions.
+- **Archive support**: Listing and reloading past long-term chat
+  sessions.
 """
 
 from __future__ import annotations
@@ -39,10 +37,14 @@ MONTH_NAME_PATTERN = (
     r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
     r"dec(?:ember)?)"
 )
+"""Regex fragment matching abbreviated and full English month names."""
+
 EVENT_DATE_PATTERN = (
     rf"(?:\d{{4}}-\d{{2}}-\d{{2}}|{MONTH_NAME_PATTERN}\s+\d{{1,2}},\s+\d{{4}}|"
     r"today|yesterday|tomorrow|last week|next week)"
 )
+"""Regex fragment matching supported date phrase formats."""
+
 LONG_TERM_FACT_FALLBACK_QUERIES = (
     "user name",
     "user preferences",
@@ -53,62 +55,56 @@ LONG_TERM_FACT_FALLBACK_QUERIES = (
     "team roadmap",
     "important facts about the user",
 )
+"""Seed queries used when a broad long-term search returns no results."""
 
 
 class MemoryService:
-    """
-    Small wrapper around the Agent Memory Server Python SDK.
+    """Wrapper around the Agent Memory Server Python SDK.
 
-    This service hides the SDK details behind app-specific operations such as:
-    1. loading/storing one session's transcript
-    2. listing archived chats for one long-term user identity
-    3. storing and searching explicit long-term facts
+    Hides SDK details behind application-specific operations:
 
-    That keeps the rest of the application from needing to know:
-    - which SDK class we use
-    - what a WorkingMemory object looks like
-    - how long-term fact records are created and searched
-    - that put_working_memory() replaces the full message list
+    1. Loading and storing a session's conversation transcript.
+    2. Listing archived chats for a long-term user identity.
+    3. Storing and searching explicit long-term facts.
+
+    Attributes:
+        _settings: Application configuration.
+        _config: AMS client configuration.
+        _client: The AMS SDK client instance.
+        _max_retries: Number of retry attempts for transient HTTP
+            errors against AMS.
     """
 
     def __init__(self, settings: Settings) -> None:
+        """Initializes the memory service and AMS client.
+
+        The client communicates with Agent Memory Server over HTTP.
+        AMS then handles persistence into Redis::
+
+            FastAPI app → MemoryAPIClient → Agent Memory Server → Redis
+
+        Args:
+            settings: Application configuration containing the AMS
+                base URL and optional namespace.
         """
-        Create the Agent Memory Server client.
-
-        Important detail:
-        The client talks to Agent Memory Server over HTTP.
-        Agent Memory Server then handles persistence into Redis.
-        So the architecture is:
-
-            FastAPI app -> MemoryAPIClient -> Agent Memory Server -> Redis
-
-        not:
-
-            FastAPI app -> Redis directly
-        """
-        # Save settings so other methods can access the namespace if needed.
         self._settings = settings
-
-        # MemoryClientConfig only needs the base URL for the server in our
-        # simple setup. We do not pass auth headers because the local Docker
-        # instance is running in a simple development configuration.
         self._config = MemoryClientConfig(
             base_url=settings.memory_api_url,
-            default_namespace=settings.memory_namespace,
         )
-
-        # The SDK client is async-capable even though creating the object is
-        # synchronous. Actual network calls happen in async methods below.
         self._client = MemoryAPIClient(self._config)
-
         self._max_retries = 3
 
-    def build_default_long_term_memory_strategy(self) -> MemoryStrategyConfig:
-        """
-        Return the default AMS extraction strategy for long-term mode.
+    def build_default_long_term_memory_strategy(
+        self,
+    ) -> MemoryStrategyConfig:
+        """Returns the default AMS extraction strategy for long-term mode.
 
-        The built-in `discrete` strategy lets `put_working_memory()` trigger
-        background extraction of user facts without requiring app-side parsing.
+        The ``discrete`` strategy lets ``put_working_memory()`` trigger
+        background extraction of user facts without requiring
+        application-side parsing.
+
+        Returns:
+            A ``MemoryStrategyConfig`` set to the ``discrete`` strategy.
         """
         return MemoryStrategyConfig(strategy="discrete")
 
@@ -118,23 +114,29 @@ class MemoryService:
         user_id: str | None = None,
         long_term_memory_strategy: MemoryStrategyConfig | None = None,
     ) -> WorkingMemory:
-        """
-        Return the full working memory document for one session.
+        """Returns the full working memory document for one session.
 
-        We keep this helper separate from load_conversation_history() because
-        some backend features need more than just the message list:
-        - archive listing needs metadata from working_memory.data
-        - archived chat reload needs the whole transcript
-        - long-term chat persistence needs the stored user_id relationship
+        Separate from ``load_conversation_history()`` because some
+        operations need more than just the message list — for example,
+        archive listing needs metadata from ``working_memory.data``.
 
-        When `long_term_memory_strategy` is provided, it is attached when the
-        session is created so AMS can apply that strategy to later transcript
-        updates for the same session.
+        When ``long_term_memory_strategy`` is provided it is attached
+        at session creation time so AMS can apply that strategy to
+        subsequent transcript updates.
+
+        Args:
+            session_id: The conversation session to load.
+            user_id: Optional stable user identity to associate.
+            long_term_memory_strategy: Optional extraction strategy
+                to attach when the session is first created.
+
+        Returns:
+            The ``WorkingMemory`` document for the session.
         """
         kwargs = dict(
             session_id=session_id,
             user_id=user_id,
-            namespace=self._settings.memory_namespace,
+
         )
         if long_term_memory_strategy is not None:
             kwargs["long_term_memory_strategy"] = long_term_memory_strategy
@@ -151,43 +153,32 @@ class MemoryService:
         session_id: str,
         user_id: str | None = None,
     ) -> list[dict]:
-        """
-        Return prior chat messages in Anthropic's expected format.
+        """Returns prior chat messages in Anthropic's expected format.
 
-        Output shape:
+        Transforms AMS ``MemoryMessage`` objects into plain dicts::
+
             [
                 {"role": "user", "content": "..."},
                 {"role": "assistant", "content": "..."},
             ]
 
-        Why we transform the messages:
-        Agent Memory Server returns MemoryMessage objects.
-        Anthropic expects a plain list of dictionaries.
-        This method is the adapter between those two formats.
+        Args:
+            session_id: The conversation session to load history for.
+            user_id: Optional stable user identity to associate.
+
+        Returns:
+            A list of message dicts with ``role`` and ``content``
+            keys, ordered chronologically.
         """
-        # get_or_create_working_memory() does two jobs:
-        #   1. If the session already exists, it returns the existing memory.
-        #   2. If the session does NOT exist, it creates an empty session.
-        #
-        # That means our chat endpoint can stay simple: it never has to worry
-        # about "does this session already exist?" branching logic.
         working_memory = await self.load_working_memory(
             session_id=session_id,
             user_id=user_id,
         )
 
-        # Convert the SDK model objects into the exact message structure that
-        # AnthropicService.chat() already understands.
-        conversation_history: list[dict] = []
-        for message in working_memory.messages:
-            conversation_history.append(
-                {
-                    "role": message.role,
-                    "content": message.content,
-                }
-            )
-
-        return conversation_history
+        return [
+            {"role": message.role, "content": message.content}
+            for message in working_memory.messages
+        ]
 
     async def store_conversation_turn(
         self,
@@ -197,39 +188,28 @@ class MemoryService:
         user_id: str | None = None,
         long_term_memory_strategy: MemoryStrategyConfig | None = None,
     ) -> None:
+        """Appends the latest user/assistant exchange to working memory.
+
+        AMS ``put_working_memory()`` replaces the full message list,
+        so this method reads the current state, appends the new turn,
+        and writes the complete updated list back.
+
+        Args:
+            session_id: The conversation session to update.
+            user_message: The user's message text.
+            assistant_message: Claude's response text.
+            user_id: Optional stable user identity.
+            long_term_memory_strategy: Optional extraction strategy.
+                When provided, AMS automatically extracts long-term
+                facts from the conversation in the background.
         """
-        Append the latest user/assistant exchange into working memory.
-
-        Critical behavior to understand:
-        Agent Memory Server's put_working_memory() REPLACES the session's
-        working memory. It does not append automatically.
-
-        So the algorithm here must be:
-        1. Read the current working memory
-        2. Copy its existing messages
-        3. Add the new user message
-        4. Add the new assistant message
-        5. Write the entire updated list back
-
-        When `long_term_memory_strategy` is provided, AMS automatically
-        extracts long-term facts from the conversation in the background.
-        """
-        # First fetch the latest stored state so we don't accidentally throw
-        # away older messages when we write the update.
         existing_memory = await self.load_working_memory(
             session_id=session_id,
             user_id=user_id,
             long_term_memory_strategy=long_term_memory_strategy,
         )
 
-        # We create explicit UTC timestamps for every message.
-        # This keeps ordering unambiguous and avoids SDK warnings about
-        # missing created_at values.
         now = datetime.now(UTC)
-
-        # Start from the full existing message list. This preserves earlier
-        # turns because put_working_memory() expects the entire replacement
-        # document, not just the new delta.
         updated_messages = list(existing_memory.messages)
 
         updated_data = self._build_chat_data(
@@ -240,7 +220,6 @@ class MemoryService:
             now=now,
         )
 
-        # Append the new user message.
         updated_messages.append(
             MemoryMessage(
                 role="user",
@@ -248,8 +227,6 @@ class MemoryService:
                 created_at=now,
             )
         )
-
-        # Append Claude's reply as the assistant message in the same turn.
         updated_messages.append(
             MemoryMessage(
                 role="assistant",
@@ -258,12 +235,6 @@ class MemoryService:
             )
         )
 
-        # Build the full WorkingMemory payload that will replace the stored
-        # session state on the server.
-        #
-        # We carry forward existing fields so this method is conservative:
-        # it updates messages while preserving any context/memories/data that
-        # Agent Memory Server may already be tracking for the same session.
         updated_working_memory = WorkingMemory(
             session_id=session_id,
             namespace=existing_memory.namespace,
@@ -272,12 +243,13 @@ class MemoryService:
             data=updated_data,
             memories=existing_memory.memories,
             messages=updated_messages,
-            long_term_memory_strategy=existing_memory.long_term_memory_strategy,
+            long_term_memory_strategy=(
+                existing_memory.long_term_memory_strategy
+            ),
             ttl_seconds=existing_memory.ttl_seconds,
             last_accessed=now,
         )
 
-        # Write the entire updated working memory document back to the server.
         await self._with_retry(
             self._client.put_working_memory,
             session_id=session_id,
@@ -290,17 +262,25 @@ class MemoryService:
         user_id: str,
         limit: int = 50,
     ) -> list[dict]:
-        """
-        Return archived chat summaries for one long-term user identity.
+        """Returns archived chat summaries for one long-term user.
 
-        Agent Memory Server already stores sessions keyed by session_id and can
-        filter them by user_id. We use that built-in capability so we do not
-        need a second archive index in Redis.
+        AMS stores sessions keyed by ``session_id`` and supports
+        filtering by ``user_id``, so no separate archive index is
+        needed.
+
+        Args:
+            user_id: The stable user identity to list chats for.
+            limit: Maximum number of sessions to return.
+
+        Returns:
+            A list of chat summary dicts sorted newest-first, each
+            containing ``session_id``, ``label``, ``message_count``,
+            ``last_updated``, and ``preview``.
         """
         session_list = await self._with_retry(
             self._client.list_sessions,
             limit=limit,
-            namespace=self._settings.memory_namespace,
+
             user_id=user_id,
         )
 
@@ -312,7 +292,6 @@ class MemoryService:
             )
             chats.append(self._build_chat_summary(working_memory))
 
-        # Sort newest-first so the archive dropdown feels natural in the UI.
         chats.sort(
             key=lambda chat: chat["last_updated"] or "",
             reverse=True,
@@ -325,11 +304,15 @@ class MemoryService:
         session_id: str,
         user_id: str,
     ) -> dict:
-        """
-        Load one archived long-term chat transcript and its display metadata.
+        """Loads one archived long-term chat transcript with metadata.
 
-        This is used when the frontend user selects an older chat from the
-        archive and needs the transcript restored into the interface.
+        Args:
+            session_id: The archived session to load.
+            user_id: The stable user identity that owns the chat.
+
+        Returns:
+            A dict containing ``session_id``, ``label``, and
+            ``messages`` (a list of normalized message dicts).
         """
         working_memory = await self.load_working_memory(
             session_id=session_id,
@@ -349,11 +332,18 @@ class MemoryService:
         query: str,
         limit: int = 5,
     ) -> list[str]:
-        """
-        Search long-term facts relevant to the current request.
+        """Searches long-term facts relevant to a query.
 
-        This method queries AMS native long-term memory rather than reusing
+        Queries AMS native long-term memory rather than reusing
         working memory as a durable fact store.
+
+        Args:
+            user_id: The stable user identity to search facts for.
+            query: The search query text.
+            limit: Maximum number of results to return.
+
+        Returns:
+            A list of fact text strings matching the query.
         """
         results = await self._search_long_term_memory_records(
             text=query,
@@ -373,23 +363,35 @@ class MemoryService:
         query: str,
         limit: int = 5,
     ) -> dict:
-        """
-        Return an Anthropic-ready prompt hydrated by AMS memory_prompt().
+        """Returns an Anthropic-ready prompt hydrated with AMS memory.
 
-        Request flow:
-        1. AMS loads the current session transcript from working memory.
+        The request flow:
+
+        1. AMS loads the current session transcript from working
+           memory.
         2. AMS searches native long-term memory for the same user.
-        3. AMS returns ready-to-send messages with remembered context injected.
+        3. AMS returns ready-to-send messages with remembered context
+           injected.
 
-        This keeps long-term retrieval inside AMS itself:
-        working memory supplies session context and long-term memory supplies
-        durable facts for the same user.
+        Args:
+            session_id: The current conversation session.
+            user_id: The stable user identity for long-term retrieval.
+            query: The current user message, used as the long-term
+                search query.
+            limit: Maximum number of long-term memories to retrieve.
+
+        Returns:
+            A dict containing:
+                - ``system_prompt``: The enriched system prompt.
+                - ``messages``: Anthropic-formatted message list.
+                - ``long_term_memories``: Retrieved long-term fact
+                  dicts.
         """
         prompt_result = await self._with_retry(
             self._client.memory_prompt,
             query=query,
             session_id=session_id,
-            namespace=self._settings.memory_namespace,
+
             user_id=user_id,
             long_term_search={
                 "limit": limit,
@@ -403,7 +405,9 @@ class MemoryService:
 
         for message in prompt_result.get("messages") or []:
             role = message.get("role")
-            text = self._coerce_message_content_text(message.get("content"))
+            text = self._coerce_message_content_text(
+                message.get("content")
+            )
             if not text:
                 continue
             if role == "system":
@@ -418,14 +422,18 @@ class MemoryService:
 
         system_prompt = self._settings.system_prompt
         if system_sections:
-            system_prompt = f"{system_prompt}\n\n" + "\n\n".join(system_sections)
+            system_prompt = (
+                f"{system_prompt}\n\n" + "\n\n".join(system_sections)
+            )
 
         return {
             "system_prompt": system_prompt,
             "messages": anthropic_messages,
             "long_term_memories": [
                 self._memory_record_to_fact_dict(memory)
-                for memory in (prompt_result.get("long_term_memories") or [])
+                for memory in (
+                    prompt_result.get("long_term_memories") or []
+                )
                 if isinstance(memory, dict) or hasattr(memory, "text")
             ],
         }
@@ -435,24 +443,32 @@ class MemoryService:
         user_id: str,
         limit: int = 20,
     ) -> list[dict]:
-        """
-        Return the user's currently remembered long-term facts.
+        """Returns the user's currently remembered long-term facts.
 
-        This powers the frontend sidebar's "Remembered Facts" list.
+        Uses a broad search phrase to surface a representative set of
+        durable memories. Falls back to multiple targeted seed queries
+        when the broad search returns no results.
 
-        AMS search is query-based, so this method uses a broad search phrase to
-        surface a representative set of durable memories for the user.
+        Args:
+            user_id: The stable user identity whose facts to load.
+            limit: Maximum number of facts to return.
+
+        Returns:
+            A list of normalized fact dicts.
         """
         try:
             results = await self._search_long_term_memory_records(
-                text="user identity preferences events conferences launches audience",
+                text=(
+                    "user identity preferences events "
+                    "conferences launches audience"
+                ),
                 user_id=user_id,
                 limit=limit,
             )
         except Exception as error:
             print(
                 "[WARN] Broad long-term fact search failed; "
-                f"falling back to seeded semantic scan: {error}"
+                f"falling back to targeted seed queries: {error}"
             )
             return await self._scan_long_term_facts_by_seed_queries(
                 user_id=user_id,
@@ -478,20 +494,23 @@ class MemoryService:
         user_id: str,
         user_message: str,
     ) -> None:
-        """
-        Extract and persist explicit long-term memories from one user turn.
+        """Extracts and persists long-term memories from a user turn.
 
-        Request flow:
-        1. `/chat` stores the transcript turn in session working memory.
-        2. This method inspects the latest user message for "rememberable" data.
-        3. New memories are written to AMS native long-term memory.
-        4. Future chats retrieve them through native long-term search.
+        The pipeline:
 
-        State flow:
-        - `session_id` tells us which chat produced the memory
-        - `user_id` ties the memory to the same person across many chats
-        - `memory_type` tells us whether the record is semantic or episodic
-        - `event_date` is populated only for time-grounded episodic memories
+        1. The ``/chat`` endpoint stores the transcript turn in
+           session working memory.
+        2. This method inspects the user message for recognizable
+           fact patterns.
+        3. Extracted memories are written to AMS native long-term
+           memory.
+        4. Future chats retrieve them through long-term search.
+
+        Args:
+            session_id: The chat session that produced the message.
+            user_id: The stable user identity to associate with
+                extracted facts.
+            user_message: The raw user message to extract facts from.
         """
         extracted_memories = self._extract_long_term_memories(
             session_id=session_id,
@@ -508,7 +527,9 @@ class MemoryService:
         )
         await self._wait_for_long_term_indexing(
             user_id=user_id,
-            expected_texts=[memory.text for memory in extracted_memories],
+            expected_texts=[
+                memory.text for memory in extracted_memories
+            ],
         )
 
     def _build_chat_data(
@@ -519,15 +540,22 @@ class MemoryService:
         updated_messages: list[MemoryMessage],
         now: datetime,
     ) -> dict:
-        """
-        Build the metadata blob stored alongside a session's transcript.
+        """Builds the metadata blob stored alongside a session transcript.
 
-        Working memory already has a flexible `data` dictionary, which makes it
-        a convenient place to store archive-friendly metadata:
-        - chat label for the archive dropdown
-        - message count for quick summaries
-        - a short preview snippet
-        - timestamps for sorting
+        The working memory ``data`` dictionary stores archive-friendly
+        metadata: chat label, message count, preview snippet, and
+        timestamps.
+
+        Args:
+            existing_data: Previously stored metadata, or ``None``.
+            user_message: The latest user message.
+            assistant_message: The latest assistant reply.
+            updated_messages: The message list before appending the
+                current turn.
+            now: Current UTC timestamp.
+
+        Returns:
+            An updated metadata dict.
         """
         data = dict(existing_data or {})
 
@@ -537,23 +565,34 @@ class MemoryService:
 
         data["message_count"] = len(updated_messages) + 2
         data["last_updated"] = now.isoformat()
-        data["preview"] = self._build_preview(assistant_message or user_message)
+        data["preview"] = self._build_preview(
+            assistant_message or user_message
+        )
 
         return data
 
-    def _build_chat_summary(self, working_memory: WorkingMemory) -> dict:
-        """
-        Convert a full working memory object into list-view metadata.
+    def _build_chat_summary(
+        self, working_memory: WorkingMemory
+    ) -> dict:
+        """Converts a working memory object into list-view metadata.
 
-        The archive dropdown does not need the whole transcript up front.
-        This summary gives the frontend enough information to label and sort
-        stored conversations before it loads one in full.
+        Produces a lightweight summary suitable for archive list
+        endpoints without exposing the full transcript.
+
+        Args:
+            working_memory: The full working memory document.
+
+        Returns:
+            A dict with ``session_id``, ``label``, ``message_count``,
+            ``last_updated``, and ``preview``.
         """
         data = dict(working_memory.data or {})
         messages = working_memory.messages
         last_updated = data.get("last_updated")
 
-        if last_updated is None and getattr(working_memory, "last_accessed", None):
+        if last_updated is None and getattr(
+            working_memory, "last_accessed", None
+        ):
             last_updated = working_memory.last_accessed.isoformat()
 
         preview = data.get("preview")
@@ -562,32 +601,42 @@ class MemoryService:
 
         return {
             "session_id": working_memory.session_id,
-            "label": data.get("chat_label") or f"Chat {working_memory.session_id}",
-            "message_count": data.get("message_count") or len(messages),
+            "label": (
+                data.get("chat_label")
+                or f"Chat {working_memory.session_id}"
+            ),
+            "message_count": (
+                data.get("message_count") or len(messages)
+            ),
             "last_updated": last_updated,
             "preview": preview,
         }
 
-    def _working_memory_to_messages(self, working_memory: WorkingMemory) -> list[dict]:
-        """
-        Normalize stored SDK message objects into API response dictionaries.
+    def _working_memory_to_messages(
+        self, working_memory: WorkingMemory
+    ) -> list[dict]:
+        """Normalizes stored messages into API response dicts.
 
-        This keeps the archive endpoint payload consistent with the frontend's
-        existing message renderer.
+        Args:
+            working_memory: The working memory document containing
+                the message list.
+
+        Returns:
+            A list of dicts with ``role``, ``content``, and optional
+            ``timestamp`` keys.
         """
-        messages: list[dict] = []
-        for message in working_memory.messages:
-            messages.append(
-                {
-                    "role": message.role,
-                    "content": message.content,
-                    "timestamp": message.created_at.isoformat()
+        return [
+            {
+                "role": message.role,
+                "content": message.content,
+                "timestamp": (
+                    message.created_at.isoformat()
                     if getattr(message, "created_at", None)
-                    else None,
-                }
-            )
-
-        return messages
+                    else None
+                ),
+            }
+            for message in working_memory.messages
+        ]
 
     def _extract_long_term_memories(
         self,
@@ -595,26 +644,35 @@ class MemoryService:
         user_id: str,
         user_message: str,
     ) -> list[ClientMemoryRecord]:
-        """
-        Extract long-term memories from explicit user statements.
+        """Extracts long-term memories from explicit user statements.
 
-        The point of this demo is not "perfect information extraction."
-        The point is to show a clean, explainable bridge from user statement
-        to persisted memory. We therefore look only for a few clear patterns.
+        Uses a small set of clear regex patterns to bridge user
+        statements to persisted memories. Specific patterns (name,
+        preferences, product launches, etc.) are tested first. A
+        catch-all ``"remember ..."`` pattern runs only when no
+        specific patterns matched.
+
+        Args:
+            session_id: The originating chat session.
+            user_id: The stable user identity.
+            user_message: The raw user message to scan.
+
+        Returns:
+            A list of ``ClientMemoryRecord`` objects ready for
+            submission to AMS. May be empty if no patterns matched.
         """
         normalized_message = user_message.strip()
         if not normalized_message:
             return []
 
-        # Specific patterns produce richer topics/entities and are tested
-        # first. Each value capture stops at sentence-ending punctuation
-        # AND at conjunctions ("and", "but") so compound sentences like
-        # "my name is Matthew and I prefer short posts" produce two clean
-        # facts instead of one bloated one.
+        # Specific patterns produce richer topics/entities. Each value
+        # capture stops at sentence-ending punctuation and conjunctions
+        # so compound sentences produce separate clean facts.
         specific_specs = [
             (
                 re.compile(
-                    r"\bmy name is (?P<value>[^.!?,\n]+?)(?:\s+(?:and|but)\b|[.!?,\n]|$)",
+                    r"\bmy name is (?P<value>[^.!?,\n]+?)"
+                    r"(?:\s+(?:and|but)\b|[.!?,\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value: (
@@ -625,7 +683,8 @@ class MemoryService:
             ),
             (
                 re.compile(
-                    r"\bi prefer (?P<value>[^.!?,\n]+?)(?:\s+(?:and|but)\b|[.!?,\n]|$)",
+                    r"\bi prefer (?P<value>[^.!?,\n]+?)"
+                    r"(?:\s+(?:and|but)\b|[.!?,\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value: (
@@ -636,7 +695,8 @@ class MemoryService:
             ),
             (
                 re.compile(
-                    r"\bour audience prefers (?P<value>[^.!?,\n]+?)(?:\s+(?:and|but)\b|[.!?,\n]|$)",
+                    r"\bour audience prefers (?P<value>[^.!?,\n]+?)"
+                    r"(?:\s+(?:and|but)\b|[.!?,\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value: (
@@ -646,17 +706,25 @@ class MemoryService:
                 ),
             ),
             (
-                re.compile(r"\bwe shipped (?P<value>[^.!?\n]+)", re.IGNORECASE),
+                re.compile(
+                    r"\bwe shipped (?P<value>[^.!?\n]+)",
+                    re.IGNORECASE,
+                ),
                 lambda value: (
-                    f"The team shipped {self._strip_trailing_event_date(value)}.",
+                    f"The team shipped "
+                    f"{self._strip_trailing_event_date(value)}.",
                     ["product", "shipping"],
                     [self._strip_trailing_event_date(value)],
                 ),
             ),
             (
-                re.compile(r"\bwe launched (?P<value>[^.!?\n]+)", re.IGNORECASE),
+                re.compile(
+                    r"\bwe launched (?P<value>[^.!?\n]+)",
+                    re.IGNORECASE,
+                ),
                 lambda value: (
-                    f"The team launched {self._strip_trailing_event_date(value)}.",
+                    f"The team launched "
+                    f"{self._strip_trailing_event_date(value)}.",
                     ["product", "launch"],
                     [self._strip_trailing_event_date(value)],
                 ),
@@ -667,31 +735,20 @@ class MemoryService:
                     re.IGNORECASE,
                 ),
                 lambda value: (
-                    f"The next conference is {self._strip_trailing_event_date(value)}.",
+                    f"The next conference is "
+                    f"{self._strip_trailing_event_date(value)}.",
                     ["events", "conference"],
                     [self._strip_trailing_event_date(value)],
                 ),
             ),
         ]
 
-        # -----------------------------------------------------------
-        # Catch-all: "remember ..." in any form
-        # -----------------------------------------------------------
-        # Safety net for facts that don't match any specific pattern.
-        # Only used when NO specific patterns matched — otherwise
-        # it would duplicate what the specific patterns already captured.
-        #
-        # Matches all common phrasings:
-        #   "Remember that X"    "Remember this: X"
-        #   "Remember, X"        "Remember X"
-        #   "Remember this X"    "Remember this, X"
-        #
-        # The optional group eats "that ", "this", commas, colons, and
-        # whitespace between "remember" and the actual content, so the
-        # captured value is always the clean fact text.
+        # Catch-all for "remember ..." in any common form. Only used
+        # when no specific patterns matched to avoid duplication.
         catchall_spec = (
             re.compile(
-                r"\bremember(?:\s+(?:that|this))?\s*[,:;]?\s*(?P<value>[^.!?\n]+)",
+                r"\bremember(?:\s+(?:that|this))?\s*[,:;]?\s*"
+                r"(?P<value>[^.!?\n]+)",
                 re.IGNORECASE,
             ),
             lambda value: (
@@ -704,10 +761,11 @@ class MemoryService:
         memories: list[ClientMemoryRecord] = []
         seen_signatures: set[tuple[str, str | None, str | None]] = set()
 
-        # Run specific patterns first.
         for pattern, builder in specific_specs:
             for match in pattern.finditer(normalized_message):
-                text, topics, entities = builder(match.group("value"))
+                text, topics, entities = builder(
+                    match.group("value")
+                )
                 memory = ClientMemoryRecord(
                     text=text,
                     session_id=session_id,
@@ -722,13 +780,12 @@ class MemoryService:
                 seen_signatures.add(signature)
                 memories.append(memory)
 
-        # Only run the catch-all if no specific patterns matched.
-        # When specific patterns fire, the catch-all would just produce
-        # a less-structured duplicate of what they already captured.
         if not memories:
             catchall_pattern, catchall_builder = catchall_spec
             for match in catchall_pattern.finditer(normalized_message):
-                text, topics, entities = catchall_builder(match.group("value"))
+                text, topics, entities = catchall_builder(
+                    match.group("value")
+                )
                 memory = ClientMemoryRecord(
                     text=text,
                     session_id=session_id,
@@ -762,88 +819,112 @@ class MemoryService:
         user_id: str,
         user_message: str,
     ) -> list[ClientMemoryRecord]:
-        """
-        Extract time-grounded event memories from explicit dated statements.
+        """Extracts time-grounded event memories from dated statements.
 
-        We keep this deliberately rule-based so the demo remains explainable:
-        a memory becomes episodic only when the sentence contains both:
-        - an event-style verb ("visited", "launched", "attended", ...)
-        - a date phrase we can ground to a concrete calendar date
+        A memory becomes episodic only when the sentence contains both
+        an event-style verb (``visited``, ``launched``, ``attended``,
+        etc.) and a date phrase that can be grounded to a concrete
+        calendar date.
+
+        Args:
+            session_id: The originating chat session.
+            user_id: The stable user identity.
+            user_message: The normalized user message to scan.
+
+        Returns:
+            A list of episodic ``ClientMemoryRecord`` objects with
+            populated ``event_date`` fields.
         """
         event_specs = [
             (
                 re.compile(
-                    rf"\bi visited (?P<value>.+?)\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
+                    rf"\bi visited (?P<value>.+?)\s+(?:on\s+)?"
+                    rf"(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value, grounded_date: (
-                    f"The user visited {value.strip()} on {grounded_date}.",
+                    f"The user visited {value.strip()} on "
+                    f"{grounded_date}.",
                     ["events", "visit"],
                     [value.strip()],
                 ),
             ),
             (
                 re.compile(
-                    rf"\bi went to (?P<value>.+?)\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
+                    rf"\bi went to (?P<value>.+?)\s+(?:on\s+)?"
+                    rf"(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value, grounded_date: (
-                    f"The user went to {value.strip()} on {grounded_date}.",
+                    f"The user went to {value.strip()} on "
+                    f"{grounded_date}.",
                     ["events", "visit"],
                     [value.strip()],
                 ),
             ),
             (
                 re.compile(
-                    rf"\bi attended (?P<value>.+?)\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
+                    rf"\bi attended (?P<value>.+?)\s+(?:on\s+)?"
+                    rf"(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value, grounded_date: (
-                    f"The user attended {value.strip()} on {grounded_date}.",
+                    f"The user attended {value.strip()} on "
+                    f"{grounded_date}.",
                     ["events", "attendance"],
                     [value.strip()],
                 ),
             ),
             (
                 re.compile(
-                    rf"\bwe launched (?P<value>.+?)\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
+                    rf"\bwe launched (?P<value>.+?)\s+(?:on\s+)?"
+                    rf"(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value, grounded_date: (
-                    f"The team launched {value.strip()} on {grounded_date}.",
+                    f"The team launched {value.strip()} on "
+                    f"{grounded_date}.",
                     ["product", "launch", "events"],
                     [value.strip()],
                 ),
             ),
             (
                 re.compile(
-                    rf"\bwe shipped (?P<value>.+?)\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
+                    rf"\bwe shipped (?P<value>.+?)\s+(?:on\s+)?"
+                    rf"(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value, grounded_date: (
-                    f"The team shipped {value.strip()} on {grounded_date}.",
+                    f"The team shipped {value.strip()} on "
+                    f"{grounded_date}.",
                     ["product", "shipping", "events"],
                     [value.strip()],
                 ),
             ),
             (
                 re.compile(
-                    rf"\bwe (?:presented|spoke) at (?P<value>.+?)\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
+                    rf"\bwe (?:presented|spoke) at (?P<value>.+?)"
+                    rf"\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})"
+                    r"(?:[.!?\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value, grounded_date: (
-                    f"The team presented at {value.strip()} on {grounded_date}.",
+                    f"The team presented at {value.strip()} on "
+                    f"{grounded_date}.",
                     ["events", "conference"],
                     [value.strip()],
                 ),
             ),
             (
                 re.compile(
-                    rf"\bour next conference is (?P<value>.+?)\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
+                    rf"\bour next conference is (?P<value>.+?)"
+                    rf"\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})"
+                    r"(?:[.!?\n]|$)",
                     re.IGNORECASE,
                 ),
                 lambda value, grounded_date: (
-                    f"The next conference is {value.strip()} on {grounded_date}.",
+                    f"The next conference is {value.strip()} on "
+                    f"{grounded_date}.",
                     ["events", "conference"],
                     [value.strip()],
                 ),
@@ -855,7 +936,9 @@ class MemoryService:
 
         for pattern, builder in event_specs:
             for match in pattern.finditer(user_message):
-                grounded = self._ground_event_date(match.group("date"), reference_now)
+                grounded = self._ground_event_date(
+                    match.group("date"), reference_now
+                )
                 if grounded is None:
                     continue
                 event_date, grounded_label = grounded
@@ -878,23 +961,30 @@ class MemoryService:
         return episodic_memories
 
     def _memory_record_to_fact_dict(self, memory) -> dict:
-        """
-        Normalize AMS memory records into the API's remembered-fact shape.
+        """Normalizes an AMS memory record into the API fact shape.
 
-        This keeps the frontend independent from the exact AMS SDK model class.
+        Handles both raw dicts and SDK model objects so callers do
+        not need to check the type.
+
+        Args:
+            memory: An AMS memory record, either a dict or an SDK
+                model object with ``text``, ``topics``, ``entities``,
+                etc. attributes.
+
+        Returns:
+            A normalized dict with ``text``, ``topics``, ``entities``,
+            ``source_session_id``, ``memory_type``, ``event_date``,
+            and ``created_at`` keys.
         """
         if isinstance(memory, dict):
-            memory_type = memory.get("memory_type")
-            event_date = memory.get("event_date")
-            created_at = memory.get("created_at")
             return {
                 "text": memory.get("text"),
                 "topics": list(memory.get("topics") or []),
                 "entities": list(memory.get("entities") or []),
                 "source_session_id": memory.get("session_id"),
-                "memory_type": memory_type,
-                "event_date": event_date,
-                "created_at": created_at,
+                "memory_type": memory.get("memory_type"),
+                "event_date": memory.get("event_date"),
+                "created_at": memory.get("created_at"),
             }
 
         memory_type = getattr(memory, "memory_type", None)
@@ -910,16 +1000,27 @@ class MemoryService:
             "entities": list(getattr(memory, "entities", []) or []),
             "source_session_id": getattr(memory, "session_id", None),
             "memory_type": memory_type,
-            "event_date": event_date.isoformat() if event_date else None,
-            "created_at": created_at.isoformat() if created_at else None,
+            "event_date": (
+                event_date.isoformat() if event_date else None
+            ),
+            "created_at": (
+                created_at.isoformat() if created_at else None
+            ),
         }
 
-    def _memory_signature(self, memory) -> tuple[str, str | None, str | None]:
-        """
-        Build a stable deduplication key for semantic and episodic memories.
+    def _memory_signature(
+        self, memory
+    ) -> tuple[str, str | None, str | None]:
+        """Builds a stable deduplication key for a memory record.
 
-        We include `memory_type` and `event_date` so the same text can exist as
-        different kinds of memory when that is intentional.
+        Includes ``memory_type`` and ``event_date`` so the same text
+        can exist as different memory kinds when intentional.
+
+        Args:
+            memory: A memory record (SDK model or dict-like).
+
+        Returns:
+            A ``(text, memory_type, event_date_iso)`` tuple.
         """
         memory_type = getattr(memory, "memory_type", None)
         if isinstance(memory_type, MemoryTypeEnum):
@@ -931,11 +1032,17 @@ class MemoryService:
         return (memory.text, memory_type, event_date_iso)
 
     def _coerce_message_content_text(self, content) -> str:
-        """
-        Normalize AMS memory_prompt content into plain text.
+        """Normalizes AMS ``memory_prompt`` content into plain text.
 
-        memory_prompt() returns structured content blocks. Anthropic expects
-        a plain string for each text message in this demo.
+        ``memory_prompt()`` may return structured content blocks.
+        This method flattens them into a single string.
+
+        Args:
+            content: A string, dict with a ``text`` key, or a list
+                of such elements.
+
+        Returns:
+            The extracted plain text, or an empty string.
         """
         if isinstance(content, str):
             return content
@@ -954,11 +1061,19 @@ class MemoryService:
         base_system_prompt: str,
         long_term_memories: list[dict],
     ) -> str:
-        """
-        Append retrieved long-term facts to the base system prompt.
+        """Appends retrieved long-term facts to the system prompt.
 
-        This is used when we cannot rely on AMS memory_prompt() to inject
+        Used when AMS ``memory_prompt()`` is not available to inject
         semantic context automatically.
+
+        Args:
+            base_system_prompt: The original system prompt text.
+            long_term_memories: A list of fact dicts, each containing
+                a ``text`` key.
+
+        Returns:
+            The enriched system prompt with facts appended, or the
+            original prompt if no facts are available.
         """
         fact_lines = [
             f"- {memory['text']}"
@@ -983,11 +1098,27 @@ class MemoryService:
         search_mode: str | None = None,
         allow_keyword_fallback: bool = True,
     ) -> list:
-        """
-        Search AMS long-term memories with an optional keyword fallback.
+        """Searches AMS long-term memories with optional fallback.
 
-        Semantic search is preferred only when the backend is explicitly
-        configured to rely on AMS vector retrieval.
+        Semantic search is preferred when the backend is configured
+        to rely on AMS vector retrieval. Falls back to keyword search
+        on failure when allowed.
+
+        Args:
+            text: The search query text.
+            user_id: The stable user identity to filter by.
+            limit: Maximum number of results.
+            search_mode: Explicit search mode override. When ``None``,
+                the mode is determined by configuration.
+            allow_keyword_fallback: Whether to retry with keyword
+                search if semantic search fails.
+
+        Returns:
+            A list of AMS memory record objects.
+
+        Raises:
+            Exception: Re-raised from the underlying SDK when all
+                search attempts fail.
         """
         if search_mode is not None:
             search_modes = [search_mode]
@@ -1020,7 +1151,8 @@ class MemoryService:
                 if mode == "semantic" and allow_keyword_fallback:
                     print(
                         "[WARN] Semantic long-term search failed; "
-                        f"retrying with keyword search: {error}"
+                        "retrying with keyword search: "
+                        f"{error}"
                     )
                     continue
                 raise
@@ -1037,14 +1169,24 @@ class MemoryService:
         limit: int,
         extra_queries: list[str] | None = None,
     ) -> list[dict]:
-        """
-        Collect remembered facts using several semantic seed queries.
+        """Collects facts using several targeted seed queries.
 
-        AMS retrieval quality depends heavily on the query phrasing. When one
-        broad query returns no matches, we sweep a few high-signal prompts and
-        merge the results into one stable fact list.
+        AMS retrieval quality depends on query phrasing. When a single
+        broad query returns no matches, this method sweeps multiple
+        high-signal prompts and merges deduplicated results.
+
+        Args:
+            user_id: The stable user identity to search.
+            limit: Maximum total facts to return.
+            extra_queries: Additional queries to prepend before the
+                built-in seed list.
+
+        Returns:
+            A deduplicated list of normalized fact dicts.
         """
-        fact_map: dict[tuple[str, str | None, str | None], dict] = {}
+        fact_map: dict[
+            tuple[str, str | None, str | None], dict
+        ] = {}
         queries: list[str] = []
         for query in extra_queries or []:
             if query and query not in queries:
@@ -1055,11 +1197,13 @@ class MemoryService:
 
         for query in queries:
             try:
-                memories = await self._search_long_term_memory_records(
-                    text=query,
-                    user_id=user_id,
-                    limit=limit,
-                    allow_keyword_fallback=False,
+                memories = (
+                    await self._search_long_term_memory_records(
+                        text=query,
+                        user_id=user_id,
+                        limit=limit,
+                        allow_keyword_fallback=False,
+                    )
                 )
             except Exception as error:
                 print(
@@ -1090,31 +1234,44 @@ class MemoryService:
         max_wait_seconds: float = 6.0,
         poll_interval_seconds: float = 0.5,
     ) -> None:
-        """
-        Poll AMS until newly created long-term memories become searchable.
+        """Polls AMS until newly created long-term memories are searchable.
 
-        Long-term indexing is asynchronous. Waiting briefly here makes the
-        remembered-facts panel and the next chat turn behave more consistently.
+        Long-term indexing is asynchronous. A brief wait here improves
+        consistency for immediately subsequent reads.
+
+        Args:
+            user_id: The stable user identity that owns the memories.
+            expected_texts: Memory text strings to poll for.
+            max_wait_seconds: Maximum total time to wait.
+            poll_interval_seconds: Delay between poll attempts.
         """
         pending_texts = {text for text in expected_texts if text}
-        attempts = max(1, int(max_wait_seconds / poll_interval_seconds))
+        attempts = max(
+            1, int(max_wait_seconds / poll_interval_seconds)
+        )
 
         for _ in range(attempts):
             resolved_texts: set[str] = set()
             for text in pending_texts:
                 try:
-                    results = await self._search_long_term_memory_records(
-                        text=text,
-                        user_id=user_id,
-                        limit=5,
+                    results = (
+                        await self._search_long_term_memory_records(
+                            text=text,
+                            user_id=user_id,
+                            limit=5,
+                        )
                     )
                 except Exception as error:
                     print(
-                        "[WARN] Skipping long-term indexing wait because search "
-                        f"is unavailable: {error}"
+                        "[WARN] Skipping long-term indexing wait "
+                        "because search is unavailable: "
+                        f"{error}"
                     )
                     return
-                if any(getattr(memory, "text", None) == text for memory in results):
+                if any(
+                    getattr(memory, "text", None) == text
+                    for memory in results
+                ):
                     resolved_texts.add(text)
 
             pending_texts -= resolved_texts
@@ -1124,14 +1281,21 @@ class MemoryService:
             await asyncio.sleep(poll_interval_seconds)
 
     def _strip_trailing_event_date(self, value: str) -> str:
-        """
-        Remove a trailing date phrase from event text before semantic storage.
+        """Removes a trailing date phrase from event text.
 
-        Example:
-        "Redis 8 on April 10, 2026" -> "Redis 8"
+        Example::
 
-        This lets us keep a timeless semantic fact alongside a separate,
+            "Redis 8 on April 10, 2026" → "Redis 8"
+
+        This separates the timeless semantic fact from the
         time-grounded episodic record for the same event.
+
+        Args:
+            value: The raw matched text potentially ending with a
+                date phrase.
+
+        Returns:
+            The text with any trailing date phrase removed.
         """
         cleaned = re.sub(
             rf"\s+(?:on|during)\s+{EVENT_DATE_PATTERN}\s*$",
@@ -1146,13 +1310,23 @@ class MemoryService:
         raw_date: str,
         reference_now: datetime,
     ) -> tuple[datetime, str] | None:
-        """
-        Resolve a supported date phrase to a concrete UTC event timestamp.
+        """Resolves a date phrase to a concrete UTC timestamp.
 
-        Assumptions:
-        - We store event dates at midnight UTC because many user statements
-          identify a day, not a precise time.
-        - Relative phrases are grounded against the server's current UTC date.
+        Relative phrases (``today``, ``yesterday``, ``next week``,
+        etc.) are grounded against the server's current UTC date.
+        Absolute dates are parsed from ISO or natural-language
+        formats. All dates are stored at midnight UTC.
+
+        Args:
+            raw_date: The raw date string extracted from user input.
+            reference_now: The current UTC datetime for resolving
+                relative phrases.
+
+        Returns:
+            A ``(event_date, label)`` tuple where ``event_date`` is a
+            midnight-UTC ``datetime`` and ``label`` is a
+            human-readable string like ``"April 10, 2026"``.
+            Returns ``None`` if the date cannot be parsed.
         """
         normalized = raw_date.strip().lower()
 
@@ -1167,9 +1341,15 @@ class MemoryService:
         elif normalized == "next week":
             grounded_day = (reference_now + timedelta(days=7)).date()
         else:
-            for date_format in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y"):
+            for date_format in (
+                "%Y-%m-%d",
+                "%B %d, %Y",
+                "%b %d, %Y",
+            ):
                 try:
-                    parsed = datetime.strptime(raw_date.strip(), date_format)
+                    parsed = datetime.strptime(
+                        raw_date.strip(), date_format
+                    )
                     grounded_day = parsed.date()
                     break
                 except ValueError:
@@ -1184,29 +1364,41 @@ class MemoryService:
             tzinfo=UTC,
         )
         grounded_label = (
-            f"{event_date.strftime('%B')} {event_date.day}, {event_date.year}"
+            f"{event_date.strftime('%B')} {event_date.day}, "
+            f"{event_date.year}"
         )
         return event_date, grounded_label
 
     async def _with_retry(self, operation, /, *args, **kwargs):
-        """
-        Retry AMS SDK calls that fail with transient HTTP transport errors.
+        """Retries AMS SDK calls that fail with transient HTTP errors.
 
-        Why this exists:
-        In local/demo setups the Agent Memory Server can occasionally drop a
-        connection without returning an HTTP response. That is frustrating in a
-        live demo because the underlying Redis-backed memory is usually fine;
-        the failure is often just a transient transport hiccup.
+        Retries up to ``_max_retries`` times for network-level
+        failures (connection drops, timeouts). Logical HTTP errors
+        such as validation failures are not retried.
 
-        We retry a few times for network-level failures only.
-        We do NOT retry logical HTTP errors such as validation failures.
+        Args:
+            operation: The async callable to invoke.
+            *args: Positional arguments forwarded to ``operation``.
+            **kwargs: Keyword arguments forwarded to ``operation``.
+
+        Returns:
+            The result of the successful ``operation`` call.
+
+        Raises:
+            httpx.RemoteProtocolError: If all retries are exhausted.
+            httpx.ReadTimeout: If all retries are exhausted.
+            httpx.ConnectError: If all retries are exhausted.
         """
         last_error = None
 
         for attempt in range(1, self._max_retries + 1):
             try:
                 return await operation(*args, **kwargs)
-            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError) as error:
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ReadTimeout,
+                httpx.ConnectError,
+            ) as error:
                 last_error = error
                 if attempt == self._max_retries:
                     break
@@ -1215,11 +1407,14 @@ class MemoryService:
         raise last_error
 
     def _build_chat_label(self, user_message: str) -> str:
-        """
-        Build a short, human-readable label for the archive dropdown.
+        """Builds a short label for a chat from the first user message.
 
-        We derive the label from the first user message because it is easy to
-        explain in the demo and avoids an extra model call just to title chats.
+        Args:
+            user_message: The first user message in the session.
+
+        Returns:
+            A truncated label no longer than 36 characters, or
+            ``"Untitled Chat"`` for empty messages.
         """
         cleaned = " ".join(user_message.strip().split())
         if not cleaned:
@@ -1231,11 +1426,13 @@ class MemoryService:
         return f"{cleaned[:33].rstrip()}..."
 
     def _build_preview(self, text: str) -> str:
-        """
-        Truncate long text for archive list previews.
+        """Truncates text for archive list previews.
 
-        The archive UI only needs a quick hint of what the chat contains,
-        not the full last message.
+        Args:
+            text: The full message text to preview.
+
+        Returns:
+            A truncated string no longer than 72 characters.
         """
         cleaned = " ".join(text.strip().split())
         if len(cleaned) <= 72:
@@ -1244,13 +1441,9 @@ class MemoryService:
         return f"{cleaned[:69].rstrip()}..."
 
     async def close(self) -> None:
-        """
-        Close the underlying HTTP client.
+        """Closes the underlying HTTP client.
 
-        We call this during FastAPI shutdown so open network resources are
-        cleaned up explicitly instead of being left to process teardown.
+        Called during application shutdown to release open network
+        resources explicitly.
         """
-        # The SDK exposes an async close even though its signature looks
-        # deceptively small at first glance. We await it so the underlying
-        # HTTP transport shuts down cleanly.
         await self._client.close()

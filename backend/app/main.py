@@ -1,6 +1,4 @@
-# =============================================================================
-# main.py - FastAPI application entry point
-# =============================================================================
+"""FastAPI application entry point for the chat backend."""
 
 from contextlib import asynccontextmanager
 
@@ -26,11 +24,17 @@ _memory_service: MemoryService | None = None
 
 
 def _resolve_long_term_user_id(request_user_id: str | None) -> str:
-    """
-    Resolve the stable identity used for long-term memory.
+    """Resolves the stable identity used for long-term memory.
 
-    `session_id` identifies one chat thread.
-    `user_id` identifies the same person across many threads.
+    Falls back to the configured default when the client does not
+    supply an explicit ``user_id``.
+
+    Args:
+        request_user_id: The user ID from the client request, or
+            ``None`` if not provided.
+
+    Returns:
+        The resolved user identity string.
     """
     settings = get_settings()
     return request_user_id or settings.default_long_term_user_id
@@ -38,8 +42,17 @@ def _resolve_long_term_user_id(request_user_id: str | None) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Manage application startup and shutdown.
+    """Manages application startup and shutdown lifecycle.
+
+    Initializes shared service instances on startup and tears down
+    open connections on shutdown.
+
+    Args:
+        app: The FastAPI application instance.
+
+    Yields:
+        Control to the running application between startup and
+        shutdown phases.
     """
     global _anthropic_service, _memory_service
 
@@ -88,8 +101,11 @@ app.add_middleware(
     include_in_schema=False,
 )
 async def health_check():
-    """
-    Return basic backend health information.
+    """Returns basic backend health information.
+
+    Returns:
+        A ``HealthResponse`` with the current status and configured
+        model name.
     """
     settings = get_settings()
     return HealthResponse(status="ok", model=settings.anthropic_model)
@@ -118,8 +134,20 @@ async def list_long_term_chats(
         description="Maximum number of archived chats to return.",
     ),
 ):
-    """
-    Return archived chat summaries for one stable user identity.
+    """Returns archived chat summaries for one stable user identity.
+
+    Args:
+        user_id: Stable user identifier. Falls back to the configured
+            default when not provided.
+        limit: Maximum number of archived chats to return.
+
+    Returns:
+        A ``LongTermChatsResponse`` containing the resolved user ID
+        and a list of chat summaries.
+
+    Raises:
+        HTTPException: 503 if the memory service is not initialized,
+            or 500 if the archive listing fails.
     """
     if _memory_service is None:
         raise HTTPException(
@@ -162,8 +190,20 @@ async def get_long_term_chat(
         description="Stable user identifier that owns the archived chat.",
     ),
 ):
-    """
-    Return the stored transcript for one archived long-term chat.
+    """Returns the stored transcript for one archived long-term chat.
+
+    Args:
+        session_id: The archived chat session to load.
+        user_id: Stable user identifier. Falls back to the configured
+            default when not provided.
+
+    Returns:
+        A ``LongTermChatResponse`` containing the session ID, label,
+        and full message transcript.
+
+    Raises:
+        HTTPException: 503 if the memory service is not initialized,
+            or 500 if the archive load fails.
     """
     if _memory_service is None:
         raise HTTPException(
@@ -216,8 +256,20 @@ async def get_long_term_facts(
         description="Maximum number of remembered facts to return.",
     ),
 ):
-    """
-    Return the current long-term fact set for one stable user identity.
+    """Returns the current long-term fact set for one user identity.
+
+    Args:
+        user_id: Stable user identifier. Falls back to the configured
+            default when not provided.
+        limit: Maximum number of facts to return.
+
+    Returns:
+        A ``LongTermFactsResponse`` containing the resolved user ID
+        and a list of remembered facts.
+
+    Raises:
+        HTTPException: 503 if the memory service is not initialized,
+            or 500 if the fact retrieval fails.
     """
     if _memory_service is None:
         raise HTTPException(
@@ -254,15 +306,27 @@ async def get_long_term_facts(
     include_in_schema=False,
 )
 async def chat(request: ChatRequest):
-    """
-    Process a chat message through Claude.
+    """Processes a chat message through Claude with optional memory.
 
-    Memory flow:
-    - `none`: no memory is loaded or stored
-    - `short-term`: load and store transcript working memory
-    - `long-term`: hydrate the prompt from working memory + native long-term
-      memory, then store the turn back into working memory so AMS can extract
-      durable facts in the background
+    Memory behavior by mode:
+
+    - ``none``: Stateless — no memory is loaded or stored.
+    - ``short-term``: Loads and stores the session transcript in
+      working memory.
+    - ``long-term``: Hydrates the prompt from working memory and
+      native long-term memory, then stores the turn back so AMS
+      can extract durable facts in the background.
+
+    Args:
+        request: The incoming ``ChatRequest`` payload.
+
+    Returns:
+        A ``ChatResponse`` containing Claude's reply, token usage,
+        and memory context metadata.
+
+    Raises:
+        HTTPException: 503 if required services are not initialized,
+            or 500 if any step in the pipeline fails.
     """
     if _anthropic_service is None:
         raise HTTPException(
@@ -276,6 +340,7 @@ async def chat(request: ChatRequest):
         else None
     )
     uses_working_memory = request.memory_mode in {"short-term", "long-term"}
+    settings = get_settings()
 
     if uses_working_memory and _memory_service is None:
         raise HTTPException(
@@ -286,53 +351,51 @@ async def chat(request: ChatRequest):
     conversation_history: list[dict] | None = None
     prepared_messages: list[dict] | None = None
     system_prompt_override: str | None = None
-
-    # Track how much memory context was loaded for this request.
-    # These counters feed the frontend's inline memory status display.
     messages_loaded: int = 0
     long_term_memories_retrieved: int = 0
 
     if request.memory_mode == "long-term":
         try:
-            hydrated_prompt = await _memory_service.build_hydrated_long_term_prompt(
-                session_id=request.session_id,
-                user_id=resolved_user_id,
-                query=request.message,
+            hydrated_prompt = (
+                await _memory_service.build_hydrated_long_term_prompt(
+                    session_id=request.session_id,
+                    user_id=resolved_user_id,
+                    query=request.message,
+                )
             )
         except Exception as error:
             print(f"[ERROR] Long-term prompt hydration error: {error}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to hydrate long-term memory prompt: {error}",
+                detail=(
+                    f"Failed to hydrate long-term memory prompt: {error}"
+                ),
             )
 
         prepared_messages = hydrated_prompt["messages"]
         system_prompt_override = hydrated_prompt["system_prompt"]
-
-        # Count the session messages that were loaded into the hydrated prompt.
-        # These are the prior conversation turns from this session's working memory.
         messages_loaded = len(prepared_messages)
-
-        # Count the durable facts that AMS retrieved from long-term memory.
-        # These are cross-session memories tied to the user_id, not the session.
         long_term_memories_retrieved = len(
             hydrated_prompt.get("long_term_memories", [])
         )
     elif request.memory_mode == "short-term":
         try:
-            conversation_history = await _memory_service.load_conversation_history(
-                session_id=request.session_id,
-                user_id=resolved_user_id,
+            conversation_history = (
+                await _memory_service.load_conversation_history(
+                    session_id=request.session_id,
+                    user_id=resolved_user_id,
+                )
             )
         except Exception as error:
             print(f"[ERROR] Memory load error: {error}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to load chat history from memory service: {error}",
+                detail=(
+                    "Failed to load chat history from memory service: "
+                    f"{error}"
+                ),
             )
 
-        # Count how many prior messages were reloaded from this session's
-        # working memory transcript. This number grows with each exchange.
         messages_loaded = len(conversation_history)
 
     try:
@@ -358,7 +421,10 @@ async def chat(request: ChatRequest):
                 user_id=resolved_user_id,
                 long_term_memory_strategy=(
                     _memory_service.build_default_long_term_memory_strategy()
-                    if request.memory_mode == "long-term"
+                    if (
+                        request.memory_mode == "long-term"
+                        and settings.enable_discrete_memory_extraction
+                    )
                     else None
                 ),
             )
@@ -366,14 +432,16 @@ async def chat(request: ChatRequest):
             print(f"[ERROR] Memory store error: {error}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to store chat history in memory service: {error}",
+                detail=(
+                    "Failed to store chat history in memory service: "
+                    f"{error}"
+                ),
             )
 
-        # In long-term mode, also run deterministic regex-based fact extraction.
-        # AMS's background "discrete" strategy is non-deterministic (LLM-driven)
-        # and may not extract facts reliably or immediately. For a live demo we
-        # need "say X, see X appear" — so we also run our own pattern matching
-        # which writes facts to AMS native long-term memory synchronously.
+        # Run deterministic regex-based fact extraction alongside AMS
+        # discrete extraction. AMS infers additional memories from the
+        # transcript in the background; this path synchronously persists
+        # a few high-signal patterns from the current user message.
         if request.memory_mode == "long-term":
             try:
                 await _memory_service.store_long_term_facts(
@@ -382,9 +450,13 @@ async def chat(request: ChatRequest):
                     user_message=request.message,
                 )
             except Exception as error:
-                # Non-fatal: the conversation already succeeded and the turn
-                # is stored. Log and continue so the user still gets a response.
-                print(f"[WARN] Explicit long-term fact extraction error: {error}")
+                # Non-fatal: the conversation already succeeded and the
+                # turn is stored. Log and continue so the user still
+                # gets a response.
+                print(
+                    "[WARN] Explicit long-term fact extraction error: "
+                    f"{error}"
+                )
 
     return ChatResponse(
         response=result["response"],
@@ -392,8 +464,6 @@ async def chat(request: ChatRequest):
         model=result["model"],
         usage=result["usage"],
         user_id=resolved_user_id,
-        # Attach memory context so the frontend can show what memory
-        # operations informed this specific response.
         memory_context=MemoryContext(
             memory_mode=request.memory_mode,
             messages_loaded=messages_loaded,

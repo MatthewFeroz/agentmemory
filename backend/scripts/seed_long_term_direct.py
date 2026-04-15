@@ -64,7 +64,6 @@ def build_memory_record(
     row: dict,
     *,
     user_id: str,
-    namespace: str | None,
 ) -> ClientMemoryRecord:
     """Builds an AMS ``ClientMemoryRecord`` from a seed data row.
 
@@ -73,7 +72,6 @@ def build_memory_record(
             keys include ``topics``, ``entities``, ``memory_type``,
             and ``event_date``.
         user_id: The stable user identity to associate with the record.
-        namespace: Optional AMS namespace for record isolation.
 
     Returns:
         A ``ClientMemoryRecord`` ready for submission to AMS.
@@ -91,8 +89,6 @@ def build_memory_record(
         "entities": list(row.get("entities") or []),
         "memory_type": parse_memory_type(row.get("memory_type")),
     }
-    if namespace:
-        kwargs["namespace"] = namespace
     if row.get("event_date"):
         kwargs["event_date"] = datetime.fromisoformat(row["event_date"])
 
@@ -108,7 +104,6 @@ async def main() -> None:
         build_memory_record(
             row,
             user_id=settings.default_long_term_user_id,
-            namespace=settings.memory_namespace,
         )
         for row in rows
     ]
@@ -116,7 +111,6 @@ async def main() -> None:
     client = MemoryAPIClient(
         MemoryClientConfig(
             base_url=settings.memory_api_url,
-            default_namespace=settings.memory_namespace,
         )
     )
 

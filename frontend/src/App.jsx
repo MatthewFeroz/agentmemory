@@ -21,7 +21,7 @@ const API_URL =
   import.meta.env.VITE_API_URL ||
   (import.meta.env.DEV ? "http://localhost:8000" : "/api");
 const LONG_TERM_USER_ID =
-  import.meta.env.VITE_LONG_TERM_USER_ID || "demo-long-term-user";
+  import.meta.env.VITE_LONG_TERM_USER_ID || "default-user";
 
 // --- Mode definitions --------------------------------------------------------
 const MODES = [
@@ -462,9 +462,8 @@ function App() {
       <header className="header">
         <div className="header-dot" />
         <h1>
-          <span className="header-redis">Redis</span> DevRel
+          <span className="header-redis">Redis</span> AI Content Strategist
         </h1>
-        <span className="header-subtitle">AI Content Strategist</span>
       </header>
 
       <div className="mode-bar">
