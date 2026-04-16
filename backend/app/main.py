@@ -89,7 +89,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -541,6 +541,16 @@ async def chat(request: ChatRequest):
     uses_working_memory = request.memory_mode in {"short-term", "long-term"}
     settings = get_settings()
 
+    regex_extraction_active = (
+        request.memory_mode == "long-term"
+        and request.extraction_mode in {"regex", "both"}
+    )
+    ams_extraction_active = (
+        request.memory_mode == "long-term"
+        and request.extraction_mode in {"ams", "both"}
+        and settings.enable_discrete_memory_extraction
+    )
+
     if uses_working_memory and _memory_service is None:
         raise HTTPException(
             status_code=503,
@@ -620,10 +630,7 @@ async def chat(request: ChatRequest):
                 user_id=resolved_user_id,
                 long_term_memory_strategy=(
                     _memory_service.build_default_long_term_memory_strategy()
-                    if (
-                        request.memory_mode == "long-term"
-                        and settings.enable_discrete_memory_extraction
-                    )
+                    if ams_extraction_active
                     else None
                 ),
             )
@@ -641,7 +648,7 @@ async def chat(request: ChatRequest):
         # discrete extraction. AMS infers additional memories from the
         # transcript in the background; this path synchronously persists
         # a few high-signal patterns from the current user message.
-        if request.memory_mode == "long-term":
+        if regex_extraction_active:
             try:
                 await _memory_service.store_long_term_facts(
                     session_id=request.session_id,
@@ -667,5 +674,10 @@ async def chat(request: ChatRequest):
             memory_mode=request.memory_mode,
             messages_loaded=messages_loaded,
             long_term_memories_retrieved=long_term_memories_retrieved,
+            extraction_mode=(
+                request.extraction_mode
+                if request.memory_mode == "long-term"
+                else None
+            ),
         ),
     )

@@ -19,6 +19,7 @@ from backend.app.config import get_settings
 
 
 SEED_FILE = Path("backend/seeds/devrel_long_term_memories.json")
+SEED_ORIGIN_TOPIC = "demo-seed"
 
 
 def load_seed_rows(path: Path) -> list[dict]:
@@ -82,10 +83,14 @@ def build_memory_record(
     if not row.get("text"):
         raise ValueError("Each seed record must include a non-empty 'text' field.")
 
+    topics = list(row.get("topics") or [])
+    if SEED_ORIGIN_TOPIC not in topics:
+        topics.append(SEED_ORIGIN_TOPIC)
+
     kwargs = {
         "text": row["text"],
         "user_id": user_id,
-        "topics": list(row.get("topics") or []),
+        "topics": topics,
         "entities": list(row.get("entities") or []),
         "memory_type": parse_memory_type(row.get("memory_type")),
     }

@@ -21,6 +21,8 @@ class MemoryContext(BaseModel):
             session transcript.
         long_term_memories_retrieved: Number of durable long-term
             facts retrieved for this user identity.
+        extraction_mode: Which long-term extraction path(s) ran for
+            this turn. Only meaningful in ``long-term`` memory mode.
     """
 
     memory_mode: Literal["none", "short-term", "long-term"] = Field(
@@ -43,6 +45,16 @@ class MemoryContext(BaseModel):
         description=(
             "Number of long-term memories retrieved from Redis for this "
             "user identity. Only applies to long-term memory mode."
+        ),
+    )
+
+    extraction_mode: Literal["regex", "ams", "both", "none"] | None = Field(
+        default=None,
+        description=(
+            "Which long-term extraction path(s) ran for this turn: 'regex' "
+            "(deterministic pattern match), 'ams' (AMS discrete LLM "
+            "extraction), 'both', or 'none'. Only meaningful in long-term "
+            "memory mode."
         ),
     )
 
@@ -96,6 +108,18 @@ class ChatRequest(BaseModel):
             "'long-term'."
         ),
         examples=["default-user"],
+    )
+
+    extraction_mode: Literal["regex", "ams", "both", "none"] = Field(
+        default="both",
+        description=(
+            "Which long-term extraction path(s) should run for this turn. "
+            "'regex' runs the deterministic pattern extractor only; 'ams' "
+            "attaches the AMS discrete LLM extraction strategy only; 'both' "
+            "runs both; 'none' skips extraction entirely. Only applies when "
+            "memory_mode is 'long-term'."
+        ),
+        examples=["ams"],
     )
 
 

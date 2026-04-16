@@ -58,6 +58,14 @@ LONG_TERM_FACT_FALLBACK_QUERIES = (
 )
 """Seed queries used when a broad long-term search returns no results."""
 
+REGEX_ORIGIN_TOPIC = "demo-regex"
+"""Topic attached to every record produced by the regex extractor.
+
+Used by the Facts panel to distinguish deterministic-regex origin from
+AMS discrete-strategy origin (which does not carry this topic). Absence
+of this tag on a record is a demo-time proxy for "extracted by AMS".
+"""
+
 
 class MemoryService:
     """Wrapper around the Agent Memory Server Python SDK.
@@ -1150,7 +1158,10 @@ class MemoryService:
         """Appends a memory to *target* unless it duplicates one already seen.
 
         Uses ``_memory_signature()`` for deduplication so the same text
-        can coexist as different memory types when intentional.
+        can coexist as different memory types when intentional. Every
+        record accepted here is tagged with ``REGEX_ORIGIN_TOPIC`` so the
+        Facts panel can distinguish regex-origin records from AMS
+        discrete-strategy records at display time.
 
         Args:
             memory: The candidate memory record.
@@ -1158,9 +1169,16 @@ class MemoryService:
             target: Mutable list to append to on success.
         """
         signature = self._memory_signature(memory)
-        if signature not in seen:
-            seen.add(signature)
-            target.append(memory)
+        if signature in seen:
+            return
+
+        existing_topics = list(memory.topics or [])
+        if REGEX_ORIGIN_TOPIC not in existing_topics:
+            existing_topics.append(REGEX_ORIGIN_TOPIC)
+            memory.topics = existing_topics
+
+        seen.add(signature)
+        target.append(memory)
 
     def _coerce_message_content_text(self, content) -> str:
         """Normalizes AMS ``memory_prompt`` content into plain text.

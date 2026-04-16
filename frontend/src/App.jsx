@@ -92,6 +92,32 @@ const MODES = [
   },
 ];
 
+// Extraction mode options surfaced in long-term mode. Each entry carries a
+// short label for the control and a one-line explainer for the audience.
+// The 'id' field is what the backend expects on ChatRequest.extraction_mode.
+const EXTRACTION_MODES = [
+  {
+    id: "regex",
+    label: "Regex",
+    description:
+      "Deterministic pattern match only. Captures ~7 phrasings instantly.",
+    hint: 'Try: "My name is Matthew." — saves instantly.',
+  },
+  {
+    id: "ams",
+    label: "AMS",
+    description:
+      "LLM-backed discrete extraction only. Async, catches flexible phrasings.",
+    hint: "Describe any fact in your own words — AMS extracts it in ~10s.",
+  },
+  {
+    id: "both",
+    label: "Both",
+    description: "Regex plus AMS discrete extraction (default).",
+    hint: "Either path can fire — mix a fixed pattern with a free-form fact.",
+  },
+];
+
 function createSessionId(prefix) {
   return `${prefix}-${Date.now()}`;
 }
@@ -138,10 +164,13 @@ function App() {
   const [rememberedFactsError, setRememberedFactsError] = useState("");
   const [deletingFactIds, setDeletingFactIds] = useState(new Set());
   const [longTermChats, setLongTermChats] = useState(() => [
-    createDraftLongTermChat("demo-long-term"),
+    createDraftLongTermChat(),
   ]);
-  const [activeLongTermChatId, setActiveLongTermChatId] = useState("demo-long-term");
+  const [activeLongTermChatId, setActiveLongTermChatId] = useState(
+    () => longTermChats[0].id
+  );
   const [activeMode, setActiveMode] = useState(0);
+  const [extractionMode, setExtractionMode] = useState("both");
 
   const mode = MODES[activeMode];
   const activeLongTermChat =
@@ -155,6 +184,7 @@ function App() {
   const inputRef = useRef(null);
   const loadLongTermChatsRef = useRef(async () => {});
   const loadRememberedFactsRef = useRef(async () => {});
+  const factsPollTimeoutsRef = useRef([]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -352,6 +382,25 @@ function App() {
 
   loadRememberedFactsRef.current = loadRememberedFacts;
 
+  const cancelFactsPoll = () => {
+    factsPollTimeoutsRef.current.forEach((id) => clearTimeout(id));
+    factsPollTimeoutsRef.current = [];
+  };
+
+  // Schedules repeated facts refetches to surface async AMS extractions
+  // without waiting for the next turn. Defaults target ~30s of 2s-interval
+  // polling, which comfortably covers typical worker latency.
+  const scheduleFactsPoll = (intervalMs = 2000, durationMs = 30000) => {
+    cancelFactsPoll();
+    const attempts = Math.floor(durationMs / intervalMs);
+    for (let i = 1; i <= attempts; i += 1) {
+      const id = setTimeout(() => {
+        void loadRememberedFactsRef.current();
+      }, i * intervalMs);
+      factsPollTimeoutsRef.current.push(id);
+    }
+  };
+
   const deleteFact = async (factId) => {
     if (!factId || deletingFactIds.has(factId)) return;
 
@@ -452,6 +501,8 @@ function App() {
           session_id: requestSessionId,
           memory_mode: requestModeId,
           user_id: requestModeId === "long-term" ? LONG_TERM_USER_ID : undefined,
+          extraction_mode:
+            requestModeId === "long-term" ? extractionMode : undefined,
         }),
       });
 
@@ -480,6 +531,13 @@ function App() {
         await loadLongTermChats(requestSessionId);
         await loadLongTermChat(requestSessionId);
         await loadRememberedFactsRef.current();
+
+        // AMS discrete extraction runs asynchronously in the worker. Poll
+        // repeatedly so background-extracted records appear in the panel
+        // without the user having to send another message.
+        if (extractionMode === "ams" || extractionMode === "both") {
+          scheduleFactsPoll();
+        }
       }
     } catch (error) {
       const errorMessage = {
@@ -505,9 +563,13 @@ function App() {
   };
 
   useEffect(() => {
-    if (mode.id !== "long-term") return;
+    if (mode.id !== "long-term") {
+      cancelFactsPoll();
+      return;
+    }
     void loadLongTermChatsRef.current();
     void loadRememberedFactsRef.current();
+    return () => cancelFactsPoll();
   }, [mode.id]);
 
   const savedLongTermChatCount = longTermChats.filter((chat) => !chat.isDraft).length;
@@ -604,6 +666,8 @@ function App() {
                         `${msg.memoryContext.messages_loaded} prior messages loaded`}
                       {msg.memoryContext.memory_mode === "long-term" &&
                         `${msg.memoryContext.messages_loaded} prior messages + ${msg.memoryContext.long_term_memories_retrieved} long-term memories loaded`}
+                      {msg.memoryContext.extraction_mode &&
+                        ` · extraction: ${msg.memoryContext.extraction_mode}`}
                     </span>
                   )}
                 </div>
@@ -626,6 +690,33 @@ function App() {
       {mode.id === "long-term" && (
         <aside className="sidebar">
           <div className="sidebar-section">
+            <span className="sidebar-label">Extraction</span>
+            <div
+              className="mode-switcher extraction-mode-switcher"
+              role="group"
+              aria-label="Extraction mode"
+            >
+              {EXTRACTION_MODES.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`mode-btn${extractionMode === option.id ? " active" : ""}`}
+                  onClick={() => setExtractionMode(option.id)}
+                  title={option.description}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="extraction-mode-hint">
+              {
+                EXTRACTION_MODES.find((option) => option.id === extractionMode)
+                  ?.hint
+              }
+            </p>
+          </div>
+
+          <div className="sidebar-section">
             <span className="sidebar-label">Chat Archive</span>
             <label className="sr-only" htmlFor="long-term-chat-picker">
               Select a previous long-term chat
@@ -647,7 +738,7 @@ function App() {
               <span className="sidebar-muted">
                 {loadingLongTermArchive
                   ? "Syncing..."
-                  : `${savedLongTermChatCount} saved`}
+                  : `${savedLongTermChatCount} chats saved`}
               </span>
               <button
                 type="button"
@@ -663,11 +754,23 @@ function App() {
           <div className="sidebar-section">
             <div className="sidebar-row">
               <span className="sidebar-label">Remembered Facts</span>
-              <span className="sidebar-muted">
-                {loadingRememberedFacts
-                  ? "loading..."
-                  : `${rememberedFacts.length}`}
-              </span>
+              <div className="facts-header-actions">
+                <span className="sidebar-muted">
+                  {loadingRememberedFacts
+                    ? "loading..."
+                    : `${rememberedFacts.length}`}
+                </span>
+                <button
+                  type="button"
+                  className="facts-refresh-btn"
+                  onClick={() => void loadRememberedFactsRef.current()}
+                  disabled={loadingRememberedFacts}
+                  title="Re-fetch facts from AMS"
+                  aria-label="Refresh remembered facts"
+                >
+                  Refresh
+                </button>
+              </div>
             </div>
 
             {rememberedFactsError && (
@@ -684,6 +787,27 @@ function App() {
               <ul className="fact-list">
                 {rememberedFacts.map((fact, index) => {
                   const isDeleting = fact.id && deletingFactIds.has(fact.id);
+                  // Origin topics are tagged by the writer: "demo-seed" by the
+                  // seed script, "demo-regex" by the backend pattern extractor.
+                  // Everything else is treated as AMS discrete-extraction origin.
+                  const topics = fact.topics || [];
+                  const isSeedOrigin = topics.includes("demo-seed");
+                  const isRegexOrigin = !isSeedOrigin && topics.includes("demo-regex");
+                  const originVariant = isSeedOrigin
+                    ? "seed"
+                    : isRegexOrigin
+                    ? "regex"
+                    : "ams";
+                  const originLabel = isSeedOrigin
+                    ? "seeded"
+                    : isRegexOrigin
+                    ? "regex"
+                    : "AMS";
+                  const originTooltip = isSeedOrigin
+                    ? "Pre-loaded by the seed script before the demo"
+                    : isRegexOrigin
+                    ? "Extracted by the deterministic regex layer"
+                    : "Extracted by AMS discrete strategy";
                   return (
                     <li
                       key={fact.id || `${fact.text}-${fact.source_session_id || index}`}
@@ -704,20 +828,24 @@ function App() {
                           </button>
                         )}
                       </div>
-                      {(fact.memory_type || fact.event_date) && (
-                        <div className="fact-meta">
-                          {fact.memory_type && (
-                            <span className={`fact-badge ${fact.memory_type}`}>
-                              {fact.memory_type}
-                            </span>
-                          )}
-                          {fact.event_date && (
-                            <span className="fact-date">
-                              {formatFactDate(fact.event_date)}
-                            </span>
-                          )}
-                        </div>
-                      )}
+                      <div className="fact-meta">
+                        <span
+                          className={`fact-origin-badge ${originVariant}`}
+                          title={originTooltip}
+                        >
+                          {isSeedOrigin ? originLabel : `via ${originLabel}`}
+                        </span>
+                        {fact.memory_type && (
+                          <span className={`fact-badge ${fact.memory_type}`}>
+                            {fact.memory_type}
+                          </span>
+                        )}
+                        {fact.event_date && (
+                          <span className="fact-date">
+                            {formatFactDate(fact.event_date)}
+                          </span>
+                        )}
+                      </div>
                     </li>
                   );
                 })}
