@@ -8,8 +8,8 @@
 // Mode 2: Short-Term     — inverted: light background, red accents
 // Mode 3: Long-Term      — modern Redis: chartreuse yellow (#DCFF1E) + navy
 //
-// Talks to our FastAPI backend. In development it defaults to localhost:8000;
-// in production it can still use the /api prefix if a reverse proxy is present.
+// Talks to our FastAPI backend through the /api prefix by default.
+// A custom VITE_API_URL can still override that when needed.
 // =============================================================================
 
 import { useEffect, useRef, useState } from "react";
@@ -18,10 +18,33 @@ import remarkGfm from "remark-gfm";
 
 // --- Configuration -----------------------------------------------------------
 const API_URL =
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.DEV ? "http://localhost:8000" : "/api");
+  import.meta.env.VITE_API_URL || "/api";
 const LONG_TERM_USER_ID =
   import.meta.env.VITE_LONG_TERM_USER_ID || "default-user";
+
+async function buildResponseError(response) {
+  const baseMessage = `Server error: ${response.status}`;
+  const contentType = response.headers.get("content-type") || "";
+
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = await response.json();
+      const detail =
+        typeof payload?.detail === "string"
+          ? payload.detail
+          : typeof payload?.message === "string"
+            ? payload.message
+            : "";
+
+      return detail ? `${baseMessage}. ${detail}` : baseMessage;
+    }
+
+    const text = (await response.text()).trim();
+    return text ? `${baseMessage}. ${text}` : baseMessage;
+  } catch {
+    return baseMessage;
+  }
+}
 
 // --- Mode definitions --------------------------------------------------------
 const MODES = [
@@ -113,6 +136,7 @@ function App() {
   const [loadingRememberedFacts, setLoadingRememberedFacts] = useState(false);
   const [rememberedFacts, setRememberedFacts] = useState([]);
   const [rememberedFactsError, setRememberedFactsError] = useState("");
+  const [deletingFactIds, setDeletingFactIds] = useState(new Set());
   const [longTermChats, setLongTermChats] = useState(() => [
     createDraftLongTermChat("demo-long-term"),
   ]);
@@ -178,7 +202,7 @@ function App() {
       );
 
       if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
+        throw new Error(await buildResponseError(response));
       }
 
       const data = await response.json();
@@ -236,7 +260,7 @@ function App() {
       );
 
       if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
+        throw new Error(await buildResponseError(response));
       }
 
       const data = await response.json();
@@ -313,7 +337,7 @@ function App() {
       );
 
       if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
+        throw new Error(await buildResponseError(response));
       }
 
       const data = await response.json();
@@ -327,6 +351,37 @@ function App() {
   };
 
   loadRememberedFactsRef.current = loadRememberedFacts;
+
+  const deleteFact = async (factId) => {
+    if (!factId || deletingFactIds.has(factId)) return;
+
+    setDeletingFactIds((prev) => new Set(prev).add(factId));
+
+    try {
+      const response = await fetch(`${API_URL}/long-term/facts`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memory_ids: [factId] }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await buildResponseError(response));
+      }
+
+      // Remove the fact from local state immediately for snappy UX,
+      // then refresh from the server to stay consistent.
+      setRememberedFacts((prev) => prev.filter((f) => f.id !== factId));
+      await loadRememberedFacts();
+    } catch (error) {
+      setRememberedFactsError(`Delete failed: ${error.message}`);
+    } finally {
+      setDeletingFactIds((prev) => {
+        const next = new Set(prev);
+        next.delete(factId);
+        return next;
+      });
+    }
+  };
 
   const startNewLongTermChat = () => {
     const draftChat = createDraftLongTermChat();
@@ -401,7 +456,7 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
+        throw new Error(await buildResponseError(response));
       }
       const data = await response.json();
 
@@ -627,28 +682,45 @@ function App() {
 
             {rememberedFacts.length > 0 && (
               <ul className="fact-list">
-                {rememberedFacts.map((fact, index) => (
-                  <li
-                    key={`${fact.text}-${fact.source_session_id || index}`}
-                    className="fact-item"
-                  >
-                    <p className="fact-text">{fact.text}</p>
-                    {(fact.memory_type || fact.event_date) && (
-                      <div className="fact-meta">
-                        {fact.memory_type && (
-                          <span className={`fact-badge ${fact.memory_type}`}>
-                            {fact.memory_type}
-                          </span>
-                        )}
-                        {fact.event_date && (
-                          <span className="fact-date">
-                            {formatFactDate(fact.event_date)}
-                          </span>
+                {rememberedFacts.map((fact, index) => {
+                  const isDeleting = fact.id && deletingFactIds.has(fact.id);
+                  return (
+                    <li
+                      key={fact.id || `${fact.text}-${fact.source_session_id || index}`}
+                      className={`fact-item${isDeleting ? " fact-item--deleting" : ""}`}
+                    >
+                      <div className="fact-header">
+                        <p className="fact-text">{fact.text}</p>
+                        {fact.id && (
+                          <button
+                            type="button"
+                            className="fact-delete-btn"
+                            title="Forget this fact"
+                            disabled={isDeleting}
+                            onClick={() => deleteFact(fact.id)}
+                            aria-label={`Delete fact: ${fact.text}`}
+                          >
+                            &times;
+                          </button>
                         )}
                       </div>
-                    )}
-                  </li>
-                ))}
+                      {(fact.memory_type || fact.event_date) && (
+                        <div className="fact-meta">
+                          {fact.memory_type && (
+                            <span className={`fact-badge ${fact.memory_type}`}>
+                              {fact.memory_type}
+                            </span>
+                          )}
+                          {fact.event_date && (
+                            <span className="fact-date">
+                              {formatFactDate(fact.event_date)}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

@@ -23,6 +23,7 @@ from agent_memory_client import MemoryAPIClient, MemoryClientConfig
 from agent_memory_client.filters import UserId
 from agent_memory_client.models import (
     ClientMemoryRecord,
+    ForgetPolicy,
     MemoryMessage,
     MemoryTypeEnum,
     MemoryStrategyConfig,
@@ -326,36 +327,6 @@ class MemoryService:
             "messages": self._working_memory_to_messages(working_memory),
         }
 
-    async def search_long_term_facts(
-        self,
-        user_id: str,
-        query: str,
-        limit: int = 5,
-    ) -> list[str]:
-        """Searches long-term facts relevant to a query.
-
-        Queries AMS native long-term memory rather than reusing
-        working memory as a durable fact store.
-
-        Args:
-            user_id: The stable user identity to search facts for.
-            query: The search query text.
-            limit: Maximum number of results to return.
-
-        Returns:
-            A list of fact text strings matching the query.
-        """
-        results = await self._search_long_term_memory_records(
-            text=query,
-            user_id=user_id,
-            limit=limit,
-        )
-        return [
-            memory.text
-            for memory in results
-            if hasattr(memory, "text")
-        ]
-
     async def build_hydrated_long_term_prompt(
         self,
         session_id: str,
@@ -532,6 +503,109 @@ class MemoryService:
             ],
         )
 
+    async def delete_long_term_memories(
+        self,
+        memory_ids: list[str],
+    ) -> int:
+        """Deletes one or more long-term memories by their server IDs.
+
+        Args:
+            memory_ids: Server-assigned identifiers of the memories
+                to remove.
+
+        Returns:
+            The number of memories that were actually deleted.
+
+        Raises:
+            Exception: Re-raised from the underlying SDK when the
+                delete operation fails.
+        """
+        result = await self._with_retry(
+            self._client.delete_long_term_memories,
+            memory_ids,
+        )
+        return len(memory_ids) if result else 0
+
+    async def update_long_term_memory(
+        self,
+        memory_id: str,
+        updates: dict,
+    ) -> dict:
+        """Patches a single long-term memory with the provided fields.
+
+        Only the keys present in ``updates`` are sent to AMS; omitted
+        fields remain unchanged on the server.
+
+        Args:
+            memory_id: Server-assigned identifier of the memory to
+                update.
+            updates: A dict of field names to new values. Accepted
+                keys mirror the ``EditMemoryRecordRequest`` schema:
+                ``text``, ``topics``, ``entities``, ``memory_type``,
+                ``event_date``.
+
+        Returns:
+            A normalized fact dict reflecting the updated record.
+
+        Raises:
+            Exception: Re-raised from the underlying SDK when the
+                update operation fails.
+        """
+        updated_record = await self._with_retry(
+            self._client.edit_long_term_memory,
+            memory_id,
+            updates,
+        )
+        return self._memory_record_to_fact_dict(updated_record)
+
+    async def forget_long_term_memories(
+        self,
+        *,
+        user_id: str,
+        max_age_days: int | None = None,
+        max_inactive_days: int | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """Runs a policy-driven forgetting pass over long-term memories.
+
+        AMS evaluates every memory for the given user against the
+        supplied thresholds and removes those that exceed them.
+
+        Args:
+            user_id: The stable user identity whose memories should
+                be evaluated.
+            max_age_days: Remove memories created more than this many
+                days ago.
+            max_inactive_days: Remove memories not accessed within
+                this many days.
+            dry_run: When ``True``, return what would be deleted
+                without actually removing anything.
+
+        Returns:
+            A dict with ``scanned``, ``deleted``, ``deleted_ids``,
+            and ``dry_run`` keys.
+
+        Raises:
+            Exception: Re-raised from the underlying SDK when the
+                forget operation fails.
+        """
+        policy = ForgetPolicy(
+            max_age_days=max_age_days,
+            max_inactive_days=max_inactive_days,
+        )
+        result = await self._with_retry(
+            self._client.forget_long_term_memories,
+            policy,
+            user_id=user_id,
+            dry_run=dry_run,
+        )
+        return {
+            "scanned": result.scanned,
+            "deleted": result.deleted,
+            "deleted_ids": list(result.deleted_ids),
+            "dry_run": result.dry_run,
+        }
+
     def _build_chat_data(
         self,
         existing_data: dict | None,
@@ -647,10 +721,20 @@ class MemoryService:
         """Extracts long-term memories from explicit user statements.
 
         Uses a small set of clear regex patterns to bridge user
-        statements to persisted memories. Specific patterns (name,
-        preferences, product launches, etc.) are tested first. A
-        catch-all ``"remember ..."`` pattern runs only when no
-        specific patterns matched.
+        statements to persisted memories.  Three layers are applied in
+        order:
+
+        1. **Semantic-only** patterns (name, preferences) — always
+           produce a single semantic memory.
+        2. **Dual-mode** patterns (shipped, launched, conference) —
+           always produce a semantic memory with the date stripped, and
+           additionally produce an episodic memory when a date phrase
+           is present and can be grounded.
+        3. **Episodic-only** patterns (visited, attended, etc.) —
+           produce an episodic memory only when a date is present.
+
+        A catch-all ``"remember ..."`` pattern runs only when no
+        specific or dual-mode patterns matched.
 
         Args:
             session_id: The originating chat session.
@@ -665,10 +749,15 @@ class MemoryService:
         if not normalized_message:
             return []
 
-        # Specific patterns produce richer topics/entities. Each value
-        # capture stops at sentence-ending punctuation and conjunctions
-        # so compound sentences produce separate clean facts.
-        specific_specs = [
+        reference_now = datetime.now(UTC)
+        memories: list[ClientMemoryRecord] = []
+        seen: set[tuple[str, str | None, str | None]] = set()
+
+        # --- Semantic-only patterns ------------------------------------
+        # Each value capture stops at sentence-ending punctuation and
+        # conjunctions so compound sentences produce separate clean
+        # facts.
+        semantic_only_specs = [
             (
                 re.compile(
                     r"\bmy name is (?P<value>[^.!?,\n]+?)"
@@ -705,111 +794,164 @@ class MemoryService:
                     [value.strip(), "Redis DevRel audience"],
                 ),
             ),
-            (
-                re.compile(
-                    r"\bwe shipped (?P<value>[^.!?\n]+)",
-                    re.IGNORECASE,
-                ),
-                lambda value: (
-                    f"The team shipped "
-                    f"{self._strip_trailing_event_date(value)}.",
-                    ["product", "shipping"],
-                    [self._strip_trailing_event_date(value)],
-                ),
-            ),
-            (
-                re.compile(
-                    r"\bwe launched (?P<value>[^.!?\n]+)",
-                    re.IGNORECASE,
-                ),
-                lambda value: (
-                    f"The team launched "
-                    f"{self._strip_trailing_event_date(value)}.",
-                    ["product", "launch"],
-                    [self._strip_trailing_event_date(value)],
-                ),
-            ),
-            (
-                re.compile(
-                    r"\bour next conference is (?P<value>[^.!?\n]+)",
-                    re.IGNORECASE,
-                ),
-                lambda value: (
-                    f"The next conference is "
-                    f"{self._strip_trailing_event_date(value)}.",
-                    ["events", "conference"],
-                    [self._strip_trailing_event_date(value)],
-                ),
-            ),
         ]
 
-        # Catch-all for "remember ..." in any common form. Only used
-        # when no specific patterns matched to avoid duplication.
-        catchall_spec = (
-            re.compile(
-                r"\bremember(?:\s+(?:that|this))?\s*[,:;]?\s*"
-                r"(?P<value>[^.!?\n]+)",
-                re.IGNORECASE,
-            ),
-            lambda value: (
-                f"{value.strip()[0].upper()}{value.strip()[1:]}.",
-                ["user-stated"],
-                [],
-            ),
-        )
-
-        memories: list[ClientMemoryRecord] = []
-        seen_signatures: set[tuple[str, str | None, str | None]] = set()
-
-        for pattern, builder in specific_specs:
+        for pattern, builder in semantic_only_specs:
             for match in pattern.finditer(normalized_message):
                 text, topics, entities = builder(
                     match.group("value")
                 )
-                memory = ClientMemoryRecord(
-                    text=text,
-                    session_id=session_id,
-                    user_id=user_id,
-                    topics=topics,
-                    entities=entities,
-                    memory_type=MemoryTypeEnum.SEMANTIC,
+                self._add_unique_memory(
+                    ClientMemoryRecord(
+                        text=text,
+                        session_id=session_id,
+                        user_id=user_id,
+                        topics=topics,
+                        entities=entities,
+                        memory_type=MemoryTypeEnum.SEMANTIC,
+                    ),
+                    seen,
+                    memories,
                 )
-                signature = self._memory_signature(memory)
-                if signature in seen_signatures:
-                    continue
-                seen_signatures.add(signature)
-                memories.append(memory)
 
+        # --- Dual-mode patterns ----------------------------------------
+        # Each regex captures an optional trailing date phrase.  A
+        # semantic memory (date stripped) is always produced.  When a
+        # date is present and can be grounded an episodic memory is
+        # produced as well.
+        dual_specs = [
+            (
+                re.compile(
+                    rf"\bwe shipped (?P<value>.+?)"
+                    rf"(?:\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN}))"
+                    r"?(?:[.!?\n]|$)",
+                    re.IGNORECASE,
+                ),
+                lambda value: (
+                    f"The team shipped {value.strip()}.",
+                    ["product", "shipping"],
+                    [value.strip()],
+                ),
+                lambda value, grounded_date: (
+                    f"The team shipped {value.strip()} on "
+                    f"{grounded_date}.",
+                    ["product", "shipping", "events"],
+                    [value.strip()],
+                ),
+            ),
+            (
+                re.compile(
+                    rf"\bwe launched (?P<value>.+?)"
+                    rf"(?:\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN}))"
+                    r"?(?:[.!?\n]|$)",
+                    re.IGNORECASE,
+                ),
+                lambda value: (
+                    f"The team launched {value.strip()}.",
+                    ["product", "launch"],
+                    [value.strip()],
+                ),
+                lambda value, grounded_date: (
+                    f"The team launched {value.strip()} on "
+                    f"{grounded_date}.",
+                    ["product", "launch", "events"],
+                    [value.strip()],
+                ),
+            ),
+            (
+                re.compile(
+                    rf"\bour next conference is (?P<value>.+?)"
+                    rf"(?:\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN}))"
+                    r"?(?:[.!?\n]|$)",
+                    re.IGNORECASE,
+                ),
+                lambda value: (
+                    f"The next conference is {value.strip()}.",
+                    ["events", "conference"],
+                    [value.strip()],
+                ),
+                lambda value, grounded_date: (
+                    f"The next conference is {value.strip()} on "
+                    f"{grounded_date}.",
+                    ["events", "conference"],
+                    [value.strip()],
+                ),
+            ),
+        ]
+
+        for pattern, sem_builder, epi_builder in dual_specs:
+            for match in pattern.finditer(normalized_message):
+                value = match.group("value")
+                text, topics, entities = sem_builder(value)
+                self._add_unique_memory(
+                    ClientMemoryRecord(
+                        text=text,
+                        session_id=session_id,
+                        user_id=user_id,
+                        topics=topics,
+                        entities=entities,
+                        memory_type=MemoryTypeEnum.SEMANTIC,
+                    ),
+                    seen,
+                    memories,
+                )
+                raw_date = match.group("date")
+                if raw_date:
+                    grounded = self._ground_event_date(
+                        raw_date, reference_now
+                    )
+                    if grounded is not None:
+                        event_date, label = grounded
+                        text, topics, entities = epi_builder(
+                            value, label
+                        )
+                        self._add_unique_memory(
+                            ClientMemoryRecord(
+                                text=text,
+                                session_id=session_id,
+                                user_id=user_id,
+                                topics=topics,
+                                entities=entities,
+                                memory_type=MemoryTypeEnum.EPISODIC,
+                                event_date=event_date,
+                            ),
+                            seen,
+                            memories,
+                        )
+
+        # --- Catch-all -------------------------------------------------
+        # "remember ..." in any common form.  Only used when no
+        # specific or dual-mode patterns matched to avoid duplication.
         if not memories:
-            catchall_pattern, catchall_builder = catchall_spec
+            catchall_pattern = re.compile(
+                r"\bremember(?:\s+(?:that|this))?\s*[,:;]?\s*"
+                r"(?P<value>[^.!?\n]+)",
+                re.IGNORECASE,
+            )
             for match in catchall_pattern.finditer(normalized_message):
-                text, topics, entities = catchall_builder(
-                    match.group("value")
+                raw = match.group("value").strip()
+                text = f"{raw[0].upper()}{raw[1:]}."
+                self._add_unique_memory(
+                    ClientMemoryRecord(
+                        text=text,
+                        session_id=session_id,
+                        user_id=user_id,
+                        topics=["user-stated"],
+                        entities=[],
+                        memory_type=MemoryTypeEnum.SEMANTIC,
+                    ),
+                    seen,
+                    memories,
                 )
-                memory = ClientMemoryRecord(
-                    text=text,
-                    session_id=session_id,
-                    user_id=user_id,
-                    topics=topics,
-                    entities=entities,
-                    memory_type=MemoryTypeEnum.SEMANTIC,
-                )
-                signature = self._memory_signature(memory)
-                if signature in seen_signatures:
-                    continue
-                seen_signatures.add(signature)
-                memories.append(memory)
 
+        # --- Episodic-only patterns ------------------------------------
         for memory in self._extract_episodic_long_term_memories(
             session_id=session_id,
             user_id=user_id,
             user_message=normalized_message,
+            reference_now=reference_now,
         ):
-            signature = self._memory_signature(memory)
-            if signature in seen_signatures:
-                continue
-            seen_signatures.add(signature)
-            memories.append(memory)
+            self._add_unique_memory(memory, seen, memories)
 
         return memories
 
@@ -818,18 +960,25 @@ class MemoryService:
         session_id: str,
         user_id: str,
         user_message: str,
+        reference_now: datetime,
     ) -> list[ClientMemoryRecord]:
         """Extracts time-grounded event memories from dated statements.
 
+        Only patterns that are **exclusively** episodic live here.
+        Patterns that also produce a semantic memory (shipped, launched,
+        conference) are handled as dual-mode specs in
+        ``_extract_long_term_memories()``.
+
         A memory becomes episodic only when the sentence contains both
-        an event-style verb (``visited``, ``launched``, ``attended``,
-        etc.) and a date phrase that can be grounded to a concrete
-        calendar date.
+        an event-style verb (``visited``, ``attended``, etc.) and a
+        date phrase that can be grounded to a concrete calendar date.
 
         Args:
             session_id: The originating chat session.
             user_id: The stable user identity.
             user_message: The normalized user message to scan.
+            reference_now: The current UTC datetime for resolving
+                relative date phrases.
 
         Returns:
             A list of episodic ``ClientMemoryRecord`` objects with
@@ -877,32 +1026,6 @@ class MemoryService:
             ),
             (
                 re.compile(
-                    rf"\bwe launched (?P<value>.+?)\s+(?:on\s+)?"
-                    rf"(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
-                    re.IGNORECASE,
-                ),
-                lambda value, grounded_date: (
-                    f"The team launched {value.strip()} on "
-                    f"{grounded_date}.",
-                    ["product", "launch", "events"],
-                    [value.strip()],
-                ),
-            ),
-            (
-                re.compile(
-                    rf"\bwe shipped (?P<value>.+?)\s+(?:on\s+)?"
-                    rf"(?P<date>{EVENT_DATE_PATTERN})(?:[.!?\n]|$)",
-                    re.IGNORECASE,
-                ),
-                lambda value, grounded_date: (
-                    f"The team shipped {value.strip()} on "
-                    f"{grounded_date}.",
-                    ["product", "shipping", "events"],
-                    [value.strip()],
-                ),
-            ),
-            (
-                re.compile(
                     rf"\bwe (?:presented|spoke) at (?P<value>.+?)"
                     rf"\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})"
                     r"(?:[.!?\n]|$)",
@@ -915,24 +1038,9 @@ class MemoryService:
                     [value.strip()],
                 ),
             ),
-            (
-                re.compile(
-                    rf"\bour next conference is (?P<value>.+?)"
-                    rf"\s+(?:on\s+)?(?P<date>{EVENT_DATE_PATTERN})"
-                    r"(?:[.!?\n]|$)",
-                    re.IGNORECASE,
-                ),
-                lambda value, grounded_date: (
-                    f"The next conference is {value.strip()} on "
-                    f"{grounded_date}.",
-                    ["events", "conference"],
-                    [value.strip()],
-                ),
-            ),
         ]
 
         episodic_memories: list[ClientMemoryRecord] = []
-        reference_now = datetime.now(UTC)
 
         for pattern, builder in event_specs:
             for match in pattern.finditer(user_message):
@@ -978,6 +1086,7 @@ class MemoryService:
         """
         if isinstance(memory, dict):
             return {
+                "id": memory.get("id"),
                 "text": memory.get("text"),
                 "topics": list(memory.get("topics") or []),
                 "entities": list(memory.get("entities") or []),
@@ -995,6 +1104,7 @@ class MemoryService:
         created_at = getattr(memory, "created_at", None)
 
         return {
+            "id": getattr(memory, "id", None),
             "text": memory.text,
             "topics": list(getattr(memory, "topics", []) or []),
             "entities": list(getattr(memory, "entities", []) or []),
@@ -1031,6 +1141,27 @@ class MemoryService:
 
         return (memory.text, memory_type, event_date_iso)
 
+    def _add_unique_memory(
+        self,
+        memory: ClientMemoryRecord,
+        seen: set[tuple[str, str | None, str | None]],
+        target: list[ClientMemoryRecord],
+    ) -> None:
+        """Appends a memory to *target* unless it duplicates one already seen.
+
+        Uses ``_memory_signature()`` for deduplication so the same text
+        can coexist as different memory types when intentional.
+
+        Args:
+            memory: The candidate memory record.
+            seen: Mutable set of signatures already collected.
+            target: Mutable list to append to on success.
+        """
+        signature = self._memory_signature(memory)
+        if signature not in seen:
+            seen.add(signature)
+            target.append(memory)
+
     def _coerce_message_content_text(self, content) -> str:
         """Normalizes AMS ``memory_prompt`` content into plain text.
 
@@ -1049,45 +1180,13 @@ class MemoryService:
         if isinstance(content, dict):
             return content.get("text", "")
         if isinstance(content, list):
-            return "\n".join(
-                self._coerce_message_content_text(item)
-                for item in content
-                if self._coerce_message_content_text(item)
-            )
+            parts: list[str] = []
+            for item in content:
+                text = self._coerce_message_content_text(item)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts)
         return ""
-
-    def _append_long_term_fact_context(
-        self,
-        base_system_prompt: str,
-        long_term_memories: list[dict],
-    ) -> str:
-        """Appends retrieved long-term facts to the system prompt.
-
-        Used when AMS ``memory_prompt()`` is not available to inject
-        semantic context automatically.
-
-        Args:
-            base_system_prompt: The original system prompt text.
-            long_term_memories: A list of fact dicts, each containing
-                a ``text`` key.
-
-        Returns:
-            The enriched system prompt with facts appended, or the
-            original prompt if no facts are available.
-        """
-        fact_lines = [
-            f"- {memory['text']}"
-            for memory in long_term_memories
-            if memory.get("text")
-        ]
-        if not fact_lines:
-            return base_system_prompt
-
-        return (
-            f"{base_system_prompt}\n\n"
-            "Remembered long-term facts from earlier chats:\n"
-            f"{chr(10).join(fact_lines)}"
-        )
 
     async def _search_long_term_memory_records(
         self,
@@ -1156,11 +1255,6 @@ class MemoryService:
                     )
                     continue
                 raise
-
-        if last_error is not None:
-            raise last_error
-
-        return []
 
     async def _scan_long_term_facts_by_seed_queries(
         self,
@@ -1279,31 +1373,6 @@ class MemoryService:
                 return
 
             await asyncio.sleep(poll_interval_seconds)
-
-    def _strip_trailing_event_date(self, value: str) -> str:
-        """Removes a trailing date phrase from event text.
-
-        Example::
-
-            "Redis 8 on April 10, 2026" → "Redis 8"
-
-        This separates the timeless semantic fact from the
-        time-grounded episodic record for the same event.
-
-        Args:
-            value: The raw matched text potentially ending with a
-                date phrase.
-
-        Returns:
-            The text with any trailing date phrase removed.
-        """
-        cleaned = re.sub(
-            rf"\s+(?:on|during)\s+{EVENT_DATE_PATTERN}\s*$",
-            "",
-            value.strip(),
-            flags=re.IGNORECASE,
-        )
-        return cleaned.strip(" ,")
 
     def _ground_event_date(
         self,

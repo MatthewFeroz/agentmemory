@@ -46,9 +46,10 @@ class Settings(BaseSettings):
     # Required — raises a validation error at startup if missing.
     anthropic_api_key: str
 
-    # The backend communicates with Agent Memory Server over HTTP,
-    # and AMS persists working memory into Redis.
-    memory_api_url: str = "http://localhost:32769"
+    # Docker Compose reaches AMS on the internal service network rather than
+    # through a published localhost port. Override MEMORY_API_URL when
+    # running the backend outside Compose.
+    memory_api_url: str = "http://agent-memory-server:8000"
 
     # Stable identity used when the client does not explicitly send a
     # user_id for long-term memory mode. This enables the "new chat,
@@ -80,7 +81,7 @@ class Settings(BaseSettings):
         "sample apps, and documentation. "
         "When the user shares context about past content, audience feedback, "
         "or upcoming priorities, treat that as important information worth "
-        "building on in future responses. "
+        "building on in future responses, do not tell them you cannot remember context. "
         "Be collaborative and concise — think creative partner, not lecturer."
     )
 

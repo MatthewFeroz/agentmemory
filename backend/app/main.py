@@ -9,11 +9,17 @@ from backend.app.config import get_settings
 from backend.app.models import (
     ChatRequest,
     ChatResponse,
+    DeleteFactsRequest,
+    DeleteFactsResponse,
+    ForgetFactsRequest,
+    ForgetFactsResponse,
     HealthResponse,
     LongTermChatResponse,
     LongTermChatsResponse,
     LongTermFactsResponse,
     MemoryContext,
+    UpdateFactRequest,
+    UpdateFactResponse,
 )
 from backend.app.services.anthropic import AnthropicService
 from backend.app.services.memory import MemoryService
@@ -292,6 +298,199 @@ async def get_long_term_facts(
         )
 
     return LongTermFactsResponse(user_id=resolved_user_id, facts=facts)
+
+
+# --- Long-term memory management (delete / update / forget) ----------------
+
+
+@app.delete(
+    "/long-term/facts",
+    response_model=DeleteFactsResponse,
+    tags=["Memory Management"],
+    summary="Delete one or more long-term facts by ID",
+)
+@app.delete(
+    "/api/long-term/facts",
+    response_model=DeleteFactsResponse,
+    include_in_schema=False,
+)
+async def delete_long_term_facts(request: DeleteFactsRequest):
+    """Removes specific long-term memories identified by their server IDs.
+
+    Args:
+        request: The ``DeleteFactsRequest`` payload containing the
+            list of memory IDs to remove.
+
+    Returns:
+        A ``DeleteFactsResponse`` confirming how many memories were
+        deleted and which IDs were targeted.
+
+    Raises:
+        HTTPException: 503 if the memory service is not initialized,
+            or 500 if the deletion fails.
+    """
+    if _memory_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory service is not initialized. Check server logs.",
+        )
+
+    try:
+        deleted_count = await _memory_service.delete_long_term_memories(
+            memory_ids=request.memory_ids,
+        )
+    except Exception as error:
+        print(f"[ERROR] Long-term fact delete error: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete long-term facts: {error}",
+        )
+
+    return DeleteFactsResponse(
+        deleted_count=deleted_count,
+        memory_ids=request.memory_ids,
+    )
+
+
+@app.patch(
+    "/long-term/facts/{memory_id}",
+    response_model=UpdateFactResponse,
+    tags=["Memory Management"],
+    summary="Update a single long-term fact",
+)
+@app.patch(
+    "/api/long-term/facts/{memory_id}",
+    response_model=UpdateFactResponse,
+    include_in_schema=False,
+)
+async def update_long_term_fact(
+    memory_id: str,
+    request: UpdateFactRequest,
+):
+    """Patches one long-term memory with the supplied field updates.
+
+    Only the fields present in the request body are modified on the
+    server; omitted fields remain unchanged.
+
+    Args:
+        memory_id: Server-assigned identifier of the memory to edit.
+        request: The ``UpdateFactRequest`` payload with updated field
+            values.
+
+    Returns:
+        An ``UpdateFactResponse`` containing the updated fact record.
+
+    Raises:
+        HTTPException: 503 if the memory service is not initialized,
+            400 if no fields are provided, or 500 if the update fails.
+    """
+    if _memory_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory service is not initialized. Check server logs.",
+        )
+
+    updates = request.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one field must be provided for update.",
+        )
+
+    try:
+        updated_fact = await _memory_service.update_long_term_memory(
+            memory_id=memory_id,
+            updates=updates,
+        )
+    except Exception as error:
+        print(f"[ERROR] Long-term fact update error: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update long-term fact: {error}",
+        )
+
+    return UpdateFactResponse(fact=updated_fact)
+
+
+@app.post(
+    "/long-term/facts/forget",
+    response_model=ForgetFactsResponse,
+    tags=["Memory Management"],
+    summary="Run a policy-driven forgetting pass",
+)
+@app.post(
+    "/api/long-term/facts/forget",
+    response_model=ForgetFactsResponse,
+    include_in_schema=False,
+)
+async def forget_long_term_facts(
+    request: ForgetFactsRequest,
+    user_id: str | None = Query(
+        default=None,
+        description=(
+            "Stable user identifier whose memories should be "
+            "evaluated for forgetting."
+        ),
+    ),
+):
+    """Runs a policy-driven cleanup over a user's long-term memories.
+
+    Memories that exceed the configured age or inactivity thresholds
+    are removed. Use ``dry_run=true`` to preview what would be
+    deleted without actually removing anything.
+
+    Args:
+        request: The ``ForgetFactsRequest`` payload containing
+            forgetting policy thresholds.
+        user_id: Stable user identifier. Falls back to the configured
+            default when not provided.
+
+    Returns:
+        A ``ForgetFactsResponse`` summarizing how many memories were
+        scanned, deleted, and their IDs.
+
+    Raises:
+        HTTPException: 503 if the memory service is not initialized,
+            400 if no policy thresholds are provided, or 500 if the
+            forget operation fails.
+    """
+    if _memory_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory service is not initialized. Check server logs.",
+        )
+
+    if request.max_age_days is None and request.max_inactive_days is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "At least one policy threshold (max_age_days or "
+                "max_inactive_days) must be provided."
+            ),
+        )
+
+    resolved_user_id = _resolve_long_term_user_id(user_id)
+
+    try:
+        result = await _memory_service.forget_long_term_memories(
+            user_id=resolved_user_id,
+            max_age_days=request.max_age_days,
+            max_inactive_days=request.max_inactive_days,
+            dry_run=request.dry_run,
+        )
+    except Exception as error:
+        print(f"[ERROR] Long-term fact forget error: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to run forgetting pass: {error}",
+        )
+
+    return ForgetFactsResponse(
+        scanned=result["scanned"],
+        deleted=result["deleted"],
+        deleted_ids=result["deleted_ids"],
+        dry_run=result["dry_run"],
+    )
 
 
 @app.post(

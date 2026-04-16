@@ -265,6 +265,7 @@ class LongTermFact(BaseModel):
     """A durable fact persisted across long-term chat sessions.
 
     Attributes:
+        id: Server-assigned unique identifier for the memory record.
         text: Human-readable fact text stored in long-term memory.
         topics: Topic labels attached to the fact for organization.
         entities: Key entities or values associated with the fact.
@@ -276,6 +277,10 @@ class LongTermFact(BaseModel):
             observed, if known.
     """
 
+    id: str | None = Field(
+        default=None,
+        description="Server-assigned unique identifier for the memory record.",
+    )
     text: str = Field(
         ...,
         description="Human-readable fact text stored in long-term memory.",
@@ -322,6 +327,152 @@ class LongTermFactsResponse(BaseModel):
     facts: list[LongTermFact] = Field(
         default_factory=list,
         description="Currently remembered long-term facts for that user.",
+    )
+
+
+class DeleteFactsRequest(BaseModel):
+    """Payload for deleting one or more long-term memories by ID.
+
+    Attributes:
+        memory_ids: Server-assigned identifiers of the memories to
+            remove.
+    """
+
+    memory_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        description="List of memory IDs to delete.",
+    )
+
+
+class DeleteFactsResponse(BaseModel):
+    """Acknowledgement returned after deleting long-term memories.
+
+    Attributes:
+        deleted_count: Number of memories that were actually removed.
+        memory_ids: The IDs that were requested for deletion.
+    """
+
+    deleted_count: int = Field(
+        ...,
+        description="Number of memories that were removed.",
+    )
+    memory_ids: list[str] = Field(
+        ...,
+        description="The memory IDs that were requested for deletion.",
+    )
+
+
+class UpdateFactRequest(BaseModel):
+    """Payload for editing one long-term memory.
+
+    All fields are optional — only the supplied fields are updated on
+    the server.
+
+    Attributes:
+        text: Updated human-readable fact text.
+        topics: Updated topic labels.
+        entities: Updated entity list.
+        memory_type: Updated memory classification.
+        event_date: Updated event date for episodic memories.
+    """
+
+    text: str | None = Field(
+        default=None,
+        description="Updated text content for the memory.",
+    )
+    topics: list[str] | None = Field(
+        default=None,
+        description="Updated topic labels for the memory.",
+    )
+    entities: list[str] | None = Field(
+        default=None,
+        description="Updated entity list for the memory.",
+    )
+    memory_type: Literal["semantic", "episodic", "message"] | None = Field(
+        default=None,
+        description="Updated memory type classification.",
+    )
+    event_date: str | None = Field(
+        default=None,
+        description="Updated event date (ISO format) for episodic memories.",
+    )
+
+
+class UpdateFactResponse(BaseModel):
+    """Response after successfully editing a long-term memory.
+
+    Attributes:
+        fact: The updated memory record.
+    """
+
+    fact: LongTermFact = Field(
+        ...,
+        description="The updated memory record.",
+    )
+
+
+class ForgetFactsRequest(BaseModel):
+    """Policy-driven request to expire stale long-term memories.
+
+    At least one policy field must be set. The server scans matching
+    memories and removes those that exceed the specified thresholds.
+
+    Attributes:
+        max_age_days: Remove memories older than this many days.
+        max_inactive_days: Remove memories not accessed within this
+            many days.
+        dry_run: When ``True``, report what would be deleted without
+            actually removing anything.
+    """
+
+    max_age_days: int | None = Field(
+        default=None,
+        ge=1,
+        description="Remove memories older than this many days.",
+    )
+    max_inactive_days: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Remove memories not accessed within this many days."
+        ),
+    )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "When true, report what would be deleted without actually "
+            "removing anything."
+        ),
+    )
+
+
+class ForgetFactsResponse(BaseModel):
+    """Summary of a policy-driven forgetting pass.
+
+    Attributes:
+        scanned: Total number of memories evaluated.
+        deleted: Number of memories actually removed (zero when
+            ``dry_run`` was ``True``).
+        deleted_ids: Server-assigned IDs of the removed memories.
+        dry_run: Whether this was a dry-run preview.
+    """
+
+    scanned: int = Field(
+        ...,
+        description="Total number of memories evaluated by the policy.",
+    )
+    deleted: int = Field(
+        ...,
+        description="Number of memories removed.",
+    )
+    deleted_ids: list[str] = Field(
+        default_factory=list,
+        description="Server-assigned IDs of the removed memories.",
+    )
+    dry_run: bool = Field(
+        ...,
+        description="Whether this was a dry-run preview.",
     )
 
 

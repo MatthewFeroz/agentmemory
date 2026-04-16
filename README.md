@@ -46,14 +46,20 @@ Compose keeps host-facing and container-facing addresses separate on purpose:
 - your browser uses `localhost:*`
 - containers talk to each other by service name such as `backend`, `agent-memory-server`, and `redis`
 - the Compose file overrides internal URLs so you do not have to rewrite app config by hand
+- host ports are assigned dynamically to avoid collisions across machines
 
 ## First-Run Checks
 
-After startup, verify these URLs:
-- Frontend: `http://localhost:3000`
-- Backend docs: `http://localhost:8000/docs`
-- Backend health: `http://localhost:8000/health`
-- Agent Memory Server health: `http://localhost:32769/v1/health`
+After startup, ask Docker which host ports were assigned:
+
+```bash
+docker compose port frontend 80
+docker compose port backend 8000
+docker compose port agent-memory-server 8000
+docker compose port redis 6379
+```
+
+Then verify the frontend, backend, and AMS URLs using the returned ports.
 
 You can also inspect the running services with:
 
@@ -93,34 +99,27 @@ Use `-v` only if you want to wipe stored memory and start fresh.
 
 ## Troubleshooting
 
-### Port Already Allocated
+### Finding Published Ports
 
-If Compose fails with a message like `Bind for 0.0.0.0:6379 failed: port is already allocated`, another local process or container is already using that host port.
-
-Common fixes:
-- stop the conflicting container or process
-- change the host port in `.env`
-
-Example alternate ports:
-
-```env
-FRONTEND_PORT=3001
-BACKEND_PORT=8001
-AMS_PORT=32770
-REDIS_PORT=6380
-```
-
-Then rerun:
+If you are not sure which host port Docker picked, run:
 
 ```bash
-docker compose up --build
+docker compose ps
+```
+
+or query a specific service:
+
+```bash
+docker compose port frontend 80
+docker compose port backend 8000
+docker compose port agent-memory-server 8000
 ```
 
 ### Frontend Loads But Chat Fails
 
 Check:
-- `http://localhost:8000/health`
-- `http://localhost:32769/v1/health`
+- the backend health URL returned by `docker compose port backend 8000`
+- the AMS health URL returned by `docker compose port agent-memory-server 8000`
 - `docker compose logs --tail 100`
 
 If the backend is up but chat requests fail, the usual causes are:

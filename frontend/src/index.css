@@ -335,8 +335,58 @@ body {
   background: var(--accent);
 }
 
+/* Wrapper row: fact text + delete button side by side */
+.fact-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
 .fact-text {
   margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+/* ×  button to forget a single fact */
+.fact-delete-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.fact-item:hover .fact-delete-btn {
+  opacity: 1;
+}
+
+.fact-delete-btn:hover {
+  color: #FF4438;
+  background: rgba(255, 68, 56, 0.12);
+}
+
+.fact-delete-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Fade-out while the delete request is in-flight */
+.fact-item--deleting {
+  opacity: 0.4;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
 }
 
 .fact-meta {
