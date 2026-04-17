@@ -21,6 +21,53 @@ This demo walks through three stages of memory:
   - **Regex** - Instant, deterministic pattern matching for common phrases like "my name is..." or "Remember that..."
   - **AMS (Agent Memory Server)** - LLM-powered extraction that understands freeform language, runs discretely in the background
 
+## Quick Start
+
+### Prerequisites
+
+- Docker Desktop (running)
+- [Redis Insight](https://redis.io/insight/) (for inspecting stored memory and vector data)
+- [Anthropic API key](https://console.anthropic.com/) (for chat-bot interactions)
+- [OpenAI API key](https://platform.openai.com/api-keys) (for AMS embeddings and extraction)
+
+### Setup
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in your two API keys:
+
+| Variable | Purpose |
+|----------|---------|
+| `ANTHROPIC_API_KEY` | Powers the Claude chat backend |
+| `OPENAI_API_KEY` | Powers AMS: embeddings (`text-embedding-3-small`) and extraction models (`gpt-4o`, `gpt-4o-mini`) |
+
+Everything else in `.env.example` has sensible defaults, image versions, model names, vector dimensions, etc. You shouldn't need to change them unless you want to swap models or tune behavior.
+
+Then start the stack:
+
+```bash
+docker compose up --build
+```
+
+Find your ports:
+
+```bash
+docker compose ps
+```
+
+Open the frontend URL in your browser, which can be found in docker, and start chatting.
+
+### Tear Down
+
+```bash
+docker compose down       # stop services
+docker compose down -v    # stop + wipe all Redis data
+```
+
+## Memory Tutorial
+
 Try these sample prompts in long-term mode with **Regex** extraction to see instant fact storage:
 
 **Semantic** (timeless facts about identity and preferences):
@@ -71,51 +118,6 @@ Toggle between all three modes in the UI to see the difference in real time.
 3. Claude generates a response with full context
 4. The conversation turn is saved to working memory
 5. Facts are extracted via regex (instant) and/or AMS (async, ~10s) and persisted to Redis
-
-## Quick Start
-
-### Prerequisites
-
-- Docker Desktop (running)
-- [Redis Insight](https://redis.io/insight/) (for inspecting stored memory and vector data)
-- [Anthropic API key](https://console.anthropic.com/) (for chat-bot interactions)
-- [OpenAI API key](https://platform.openai.com/api-keys) (for AMS embeddings and extraction)
-
-### Setup
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and fill in your two API keys:
-
-| Variable | Purpose |
-|----------|---------|
-| `ANTHROPIC_API_KEY` | Powers the Claude chat backend |
-| `OPENAI_API_KEY` | Powers AMS: embeddings (`text-embedding-3-small`) and extraction models (`gpt-4o`, `gpt-4o-mini`) |
-
-Everything else in `.env.example` has sensible defaults, image versions, model names, vector dimensions, etc. You shouldn't need to change them unless you want to swap models or tune behavior.
-
-Then start the stack:
-
-```bash
-docker compose up --build
-```
-
-Find your ports:
-
-```bash
-docker compose ps
-```
-
-Open the frontend URL in your browser, which can be found in docker, and start chatting.
-
-### Tear Down
-
-```bash
-docker compose down       # stop services
-docker compose down -v    # stop + wipe all Redis data
-```
 
 ## Troubleshooting
 
