@@ -7,7 +7,7 @@
 
 LLMs are stateless. Every request starts from zero with no memory of who you are, what you said, or what matters to you. This demo shows how Redis changes that by giving an AI assistant **short-term** and **long-term** memory, turning a forgetful chatbot into one that actually learns.
 
-![Project Screenshot](frontend\public\demo_screenshot.png)
+![Project Screenshot](frontend/public/demo_screenshot.png)
 
 ## The Journey
 
@@ -21,15 +21,31 @@ This demo walks through three stages of memory:
   - **Regex** - Instant, deterministic pattern matching for common phrases like "my name is..." or "Remember that..."
   - **AMS (Agent Memory Server)** - LLM-powered extraction that understands freeform language, runs discretely in the background
 
+Try these sample prompts in long-term mode with **Regex** extraction to see instant fact storage:
+
+**Semantic** (timeless facts about identity and preferences):
+- `My name is Matthew`
+- `I prefer dark mode`
+- `Remember that the deploy key rotates every 90 days`
+
+**Episodic** (time-bound events tied to a specific date):
+- `We shipped the new API on March 10`
+- `I attended KubeCon on April 3`
+- `Our next conference is RedisConf on June 15`
+
+Switch to **AMS** extraction and say the same things in your own words to see how LLM-powered extraction handles freeform language.
+
 Toggle between all three modes in the UI to see the difference in real time.
+
+> The demo pre-loads a set of long-term memories on startup. To customize or remove them, edit `backend/seeds/devrel_long_term_memories.json` or delete them from the frontend.
 
 ## Architecture
 
 ```
 ┌─────────────┐         ┌──────────────────┐        ┌───────────────────────┐
-│   Frontend   │  HTTP   │     Backend      │  SDK   │  Agent Memory Server  │
-│  React/Nginx ├────────►│     FastAPI      ├───────►│        (AMS)          │
-│              │         │                  │        │  Async LLM extraction │
+│   Frontend  │  HTTP   │     Backend      │  SDK   │  Agent Memory Server  │
+│  React/Nginx├────────►│     FastAPI      ├───────►│        (AMS)          │
+│             │         │                  │        │  Async LLM extraction │
 └─────────────┘         └───────┬──────────┘        └───────────┬───────────┘
                                 │                               │
                                 │  Anthropic API                │  OpenAI Embeddings
