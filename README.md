@@ -1,8 +1,9 @@
 # Redis Memory Demo
 
+[![Redis](https://img.shields.io/badge/memory-Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Redis AMS](https://img.shields.io/badge/AgentMemoryServer-Redis-DC382D?logo=redis&logoColor=white)](https://github.com/redis/agent-memory-server)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/frontend-React-61DAFB?logo=react&logoColor=000)](https://react.dev/)
-[![Redis](https://img.shields.io/badge/memory-Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![Docker Compose](https://img.shields.io/badge/runtime-Docker_Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 
 LLMs are stateless. Every request starts from zero with no memory of who you are, what you said, or what matters to you. This demo shows how Redis changes that by giving an AI assistant **short-term** and **long-term** memory, turning a forgetful chatbot into one that actually learns.
