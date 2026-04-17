@@ -55,7 +55,7 @@ const MODES = [
     heading: "No Memory Mode",
     description:
       "Each message is independent. The assistant has no context of previous messages — every request starts from zero.",
-    session: "demo-no-memory",
+    session: `demo-no-memory-${Date.now()}`,
     suggestions: [
       "Help me brainstorm a LinkedIn post about Redis for AI apps.",
       "Write me 5 hooks for a Redis developer tutorial.",
@@ -69,7 +69,7 @@ const MODES = [
     heading: "Short-Term Memory",
     description:
       "The assistant remembers everything from this session. Conversation history is loaded from Redis on every request.",
-    session: "demo-short-term",
+    session: `demo-short-term-${Date.now()}`,
     suggestions: [
       "Help me outline a Redis webinar for software engineers.",
       "Write me 5 hooks for a post about Redis caching strategies.",
