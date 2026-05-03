@@ -1,4 +1,4 @@
-# Redis Memory Demo
+# Agent Memory Demo
 
 [![Redis](https://img.shields.io/badge/memory-Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![Redis AMS](https://img.shields.io/badge/AgentMemoryServer-Redis-DC382D?logo=redis&logoColor=white)](https://github.com/redis/agent-memory-server)
